@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AirGuard · D1 Web 监测台</title>
+  <!-- mqtt.js CDN（UMD 构建，暴露全局 mqtt） -->
+  <script src="https://cdn.jsdelivr.net/npm/mqtt@5/dist/mqtt.min.js"></script>
+  <style>
+    :root {
+      --bg: #f3f5f9;
+      --card-bg: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --wait: #9ca3af;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      min-height: 100vh;
+      padding: 24px;
+    }
+    header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+    header h1 { font-size: 22px; }
+    #conn { font-size: 13px; color: var(--muted); }
+    #conn .dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+      background: var(--wait);
+    }
+    #conn.on .dot { background: #22c55e; }
+    #conn.off .dot { background: #ef4444; }
+    main {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    .card {
+      background: var(--card-bg);
+      border-radius: 12px;
+      border: 1px solid #e5e7eb;
+      border-left: 5px solid var(--wait);
+      padding: 16px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .05);
+    }
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .card-head h2 { font-size: 17px; }
+    .badge {
+      font-size: 13px;
+      color: #fff;
+      background: var(--wait);
+      padding: 3px 10px;
+      border-radius: 999px;
+    }
+    .metrics {
+      list-style: none;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 16px;
+    }
+    .metrics li { font-size: 13px; color: var(--muted); }
+    .metrics b {
+      display: block;
+      font-size: 18px;
+      color: var(--text);
+      font-weight: 600;
+    }
+    .time { margin-top: 12px; font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AirGuard · D1 Web 监测台</h1>
+    <div id="conn"><span class="dot"></span><span id="conn-text">连接中…</span></div>
+  </header>
+  <main id="cards"></main>
+
+  <script type="module">
+    import { calcAirStatus } from './util.js';
+
+    // 全局对象：各区域数据分开存，互不串线
+    window.globalZones = {
+      'zone-n': null,
+      'zone-s': null,
+      'zone-w': null,
+    };
+    const ZONES = Object.keys(window.globalZones);
+
+    const MQTT_URL = 'ws://127.0.0.1:8083';
+    const TOPIC = 'airguard/+/env';
+
+    // status → 卡片左侧边框色（含徽章底色）
+    const STATUS_COLORS = {
+      '正常': '#22c55e',
+      '轻度污染': '#f59e0b',
+      '重度污染': '#ef4444',
+      '通风不足风险': '#9333ea',
+    };
+    const WAIT_COLOR = '#9ca3af';
+
+    const $cards = document.getElementById('cards');
+    const $conn = document.getElementById('conn');
+    const $connText = document.getElementById('conn-text');
+
+    function setConn(state) {
+      $conn.className = state; // '' | 'on' | 'off'
+      $connText.textContent =
+        state === 'on' ? '已连接 ws://127.0.0.1:8083' :
+        state === 'off' ? '连接断开，自动重连中…' : '连接中…';
+    }
+
+    // 优先取 payload.zoneId；缺失时退回 topic 中间段（airguard/<zone>/env）；都不认识则丢弃
+    function resolveZone(topic, payload) {
+      const z = (payload && payload.zoneId) || topic.split('/')[1] || '';
+      return Object.prototype.hasOwnProperty.call(window.globalZones, z) ? z : null;
+    }
+
+    function onEnvMessage(topic, payload) {
+      const zone = resolveZone(topic, payload);
+      if (!zone) {
+        console.warn('[AirGuard] 未知区域消息，已忽略:', topic);
+        return;
+      }
+      // 只更新对应 zone 的条目，绝不写入其他区域
+      window.globalZones[zone] = {
+        zoneId: payload.zoneId,
+        pm25: payload.pm25,
+        co2: payload.co2,
+        crowdLevel: payload.crowdLevel,
+        time: payload.time,
+        status: calcAirStatus(payload.pm25, payload.co2),
+        updatedAt: new Date(),
+      };
+      renderUI();
+    }
+
+    function renderUI() {
+      const fmt = (x) => (x === undefined || x === null || x === '' ? '--' : x);
+      $cards.innerHTML = ZONES.map((zone) => {
+        const d = window.globalZones[zone];
+        const color = d ? (STATUS_COLORS[d.status] || WAIT_COLOR) : WAIT_COLOR;
+        const badge = d ? d.status : '等待数据';
+        const localTime = d
+          ? d.updatedAt.toLocaleTimeString('zh-CN', { hour12: false })
+          : '暂无消息';
+        return `
+          <section class="card" style="border-left-color:${color}">
+            <div class="card-head">
+              <h2>${zone}</h2>
+              <span class="badge" style="background:${color}">${badge}</span>
+            </div>
+            <ul class="metrics">
+              <li>PM2.5<b>${fmt(d && d.pm25)}</b>μg/m³</li>
+              <li>CO₂<b>${fmt(d && d.co2)}</b>ppm</li>
+              <li>人流等级<b>${fmt(d && d.crowdLevel)}</b></li>
+              <li>上报时间<b>${fmt(d && d.time)}</b></li>
+            </ul>
+            <p class="time">本地更新于 ${localTime}</p>
+          </section>`;
+      }).join('');
+    }
+
+    // MQTT 连接
+    const client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000 });
+
+    client.on('connect', () => {
+      setConn('on');
+      client.subscribe(TOPIC, (err) => {
+        if (err) console.error('[AirGuard] 订阅失败:', err);
+      });
+    });
+    client.on('close', () => setConn('off'));
+    client.on('offline', () => setConn('off'));
+    client.on('reconnect', () => setConn(''));
+    client.on('error', (err) => console.error('[AirGuard] MQTT 错误:', err));
+    client.on('message', (topic, message) => {
+      try {
+        // TextDecoder 兼容 Buffer / Uint8Array 两种 payload 形态
+        onEnvMessage(topic, JSON.parse(new TextDecoder().decode(message)));
+      } catch (e) {
+        console.error('[AirGuard] 消息解析失败:', e);
+      }
+    });
+
+    renderUI(); // 初始渲染：三张卡片均为「等待数据」、灰色左边框
+  </script>
+</body>
+</html>
