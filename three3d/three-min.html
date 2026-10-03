@@ -136,6 +136,7 @@
     .d3-line.open { color: #374151; border: 1px solid #e5e7eb; background: #ffffff; }
     .d3-line.handling { color: #b45309; background: #fff7e6; border: 1px solid #fcd34d; }
     .d3-line.ok { color: #2e7d32; background: #e8f5e9; }
+    .d3-line.off { color: #c62828; background: #ffebee; }
     .d3-info {
       position: absolute;
       left: 12px;
@@ -151,6 +152,23 @@
       color: var(--text);
       box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
     }
+
+    /* ===== D4 链路状态（左侧面板） ===== */
+    #d4-panel { display: grid; gap: 6px; margin-top: 4px; }
+    .d4-line { font-size: 12px; color: var(--muted); padding: 4px 8px; border-radius: 6px; background: #f8fafc; }
+    .d4-line.on { color: #2e7d32; background: #e8f5e9; }
+    .d4-line.off { color: #c62828; background: #ffebee; }
+    .d4-btn {
+      margin-top: 8px;
+      font-size: 12px;
+      padding: 5px 14px;
+      border: 1px solid #2563eb;
+      color: #2563eb;
+      background: #fff;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .d4-btn:hover { background: #2563eb; color: #fff; }
 
     .canvas-wrap {
       flex: 1;
@@ -213,6 +231,11 @@
       <!-- D3 干预—验证—恢复：OPEN 白框 / HANDLING 橙色闪烁 / RECOVERED 恢复原色 -->
       <h2 class="d2-title">D3 事件状态<span class="tag">D3</span></h2>
       <div id="d3-panel"></div>
+
+      <!-- D4 实时链路：MQTT 连接状态 + 各区域在线/离线 + 手动重连 -->
+      <h2 class="d2-title">D4 链路状态<span class="tag">D4</span></h2>
+      <div id="d4-panel"></div>
+      <button id="btn-reconnect" class="d4-btn" type="button">手动重连</button>
     </aside>
     <section class="canvas-wrap" id="canvas-wrap">
       <div id="three-fallback" class="placeholder" style="display:none">Three.js CDN 加载失败，请检查网络后刷新</div>
@@ -310,6 +333,15 @@
       const zoneLastMsgTime = {}; // zone → 最近报文 time（乱序判断）
       const zoneLastMsgKey = {};  // zone → 最近报文去重键（重复判断）
 
+      // ============ D4 实时链路故障与修复 ============
+      // 故障场景：区域节点长时间断流（超过阈值不再上报数据）
+      // 流程：观察现象（离线判定/灰显）→ 定位原因 → 修复 → 重新运行 → 验证恢复
+      const D4_OFFLINE_THRESHOLD = 120000; // 2 分钟无新数据 → 节点离线
+      const d4LastSeen = {};   // zone → 最后收到报文的 Date
+      const d4Online = {};     // zone → 在线状态（定时器维护）
+      let mqttConnState = '';  // '' | 'on' | 'off'（Broker 连接状态）
+      ZONE_IDS.forEach(function (z) { d4LastSeen[z] = null; d4Online[z] = false; });
+
       // ============ DOM ============
       const $conn = document.getElementById('conn');
       const $connText = document.getElementById('conn-text');
@@ -317,6 +349,7 @@
       const $canvasWrap = document.getElementById('canvas-wrap');
       const $d2Priority = document.getElementById('d2-priority');
       const $d2Reason = document.getElementById('d2-reason');
+      const $d4Panel = document.getElementById('d4-panel');
 
       // ============ status 计算（任务书顺序，仅用 pm25 / co2） ============
       function calcStatus(pm25, co2) {
@@ -340,6 +373,14 @@
           state === 'on' ? '已连接 ' + MQTT_URL :
           state === 'off' ? '连接断开，自动重连中…' : '连接中…'
         );
+        // D4：Broker 连接状态变化 → 控制台日志 + 面板刷新（仅在状态真正变化时记录）
+        if (state === 'on' && mqttConnState !== 'on') {
+          console.log('[AirGuard] D4 故障日志: [Broker连接] MQTT Broker 连接成功');
+        } else if (state === 'off' && mqttConnState === 'on') {
+          console.log('[AirGuard] D4 故障日志: [Broker断开] MQTT Broker 连接断开，自动重连中…');
+        }
+        mqttConnState = state;
+        renderD4Panel();
       }
 
       // 数据契约字段为 zoneId；兼容小写 zoneid；缺失时退回 topic 中间段；不认识则丢弃
@@ -557,21 +598,23 @@
         return { canvas: canvas, texture: texture, sprite: sprite };
       }
 
-      function updateLabel(label, zone, d) {
+      function updateLabel(label, zone, d, offline) {
         const ctx = label.canvas.getContext('2d');
         ctx.clearRect(0, 0, 512, 224);
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        // 第一行：区域名；第二行：状态（按状态色）；第三行：处置过程
+        // 第一行：区域名；第二行：状态（按状态色，离线灰显）；第三行：处置过程 / 断流提示
         ctx.font = 'bold 44px "Microsoft YaHei", "Segoe UI", sans-serif';
         ctx.fillStyle = '#1f2937';
         ctx.fillText(ZONES[zone].name, 256, 46);
         ctx.font = 'bold 38px "Microsoft YaHei", "Segoe UI", sans-serif';
-        ctx.fillStyle = d ? (STATUS_ACCENT[d.status] || WAIT_ACCENT) : WAIT_ACCENT;
-        ctx.fillText(d ? d.status : '暂无数据', 256, 98);
+        ctx.fillStyle = offline ? WAIT_ACCENT : (d ? (STATUS_ACCENT[d.status] || WAIT_ACCENT) : WAIT_ACCENT);
+        ctx.fillText(offline ? '已离线' : (d ? d.status : '暂无数据'), 256, 98);
         ctx.font = '26px "Microsoft YaHei", "Segoe UI", sans-serif';
         ctx.fillStyle = '#37474f';
-        if (d) {
+        if (offline) {
+          ctx.fillText('节点断流 · 等待恢复', 256, 152);
+        } else if (d) {
           ctx.fillText(DISPOSALS[d.status] || '—', 256, 152);
         }
         label.texture.needsUpdate = true;
@@ -581,18 +624,21 @@
         if (!renderer) return;
         ZONE_IDS.forEach(function (z) {
           const d = zoneState[z];
-          const hex = d
-            ? (STATUS_COLORS[d.status] !== undefined ? STATUS_COLORS[d.status] : WAIT_COLOR)
+          const online = !!d4Online[z];
+          // 离线节点：模型灰显，不再更新实时数据
+          const eff = online ? d : null;
+          const hex = eff
+            ? (STATUS_COLORS[eff.status] !== undefined ? STATUS_COLORS[eff.status] : WAIT_COLOR)
             : WAIT_COLOR;
           // 重绘该区域所有墙体贴图（换色），屋顶/底座保持中性色
           buildings[z].walls.forEach(function (w) { repaintWall(w, hex); });
-          // 地面热力光斑同步表达风险
-          updateHeatSpot(heatSpots[z], d);
-          updateLabel(labels[z], z, d);
+          // 地面热力光斑同步表达风险（离线清空）
+          updateHeatSpot(heatSpots[z], eff);
+          updateLabel(labels[z], z, eff, !online);
           // D2 高亮壳颜色随状态强调色（是否可见由 animate 闪烁控制）
           if (highlightShells[z]) {
             highlightShells[z].material.color.set(
-              d ? (STATUS_ACCENT[d.status] || WAIT_ACCENT) : WAIT_ACCENT
+              eff ? (STATUS_ACCENT[eff.status] || WAIT_ACCENT) : WAIT_ACCENT
             );
           }
         });
@@ -782,7 +828,7 @@
             anomalyCount: d2State[z].anomalyCount,
             score: d2State[z].score,
             review: d2State[z].review,
-            abnormal: !!(d && d.status !== '正常'),
+            abnormal: !!(d && d.status !== '正常' && d4Online[z]), // 离线节点不参与 D2 优先级
           };
         }).filter(function (e) { return e.abnormal; });
         if (abnormal.length === 0) return null; // 全部正常 → 无优先关注区域
@@ -932,6 +978,11 @@
         const $d3Panel = document.getElementById('d3-panel');
         $d3Panel.innerHTML = ZONE_IDS.map(function (z) {
           const ev = d3Events[z];
+          if (!d4Online[z]) {
+            // 离线节点不参与 D3 事件状态计算，事件冻结，标记壳隐藏
+            d3ShellState[z] = null;
+            return '<div class="d3-line off">' + ZONES[z].name + '：已离线（事件状态冻结）</div>';
+          }
           if (!ev) {
             d3ShellState[z] = null;
             const hist = d3History.filter(function (e) { return e.zoneId === z; });
@@ -977,6 +1028,51 @@
         $d3Info.style.display = 'block';
         clearTimeout(d3InfoTimer);
         d3InfoTimer = setTimeout(function () { $d3Info.style.display = 'none'; }, 8000);
+      }
+
+      // ============ D4：链路状态面板 / 定时在线判定 / 手动重连 ============
+      function renderD4Panel() {
+        const $el = $d4Panel;
+        const brokerLine = '<div class="d4-line ' + (mqttConnState === 'on' ? 'on' : 'off') + '">' +
+          'MQTT：' + (mqttConnState === 'on' ? '已连接' : (mqttConnState === 'off' ? '已断开' : '连接中…')) + '</div>';
+        const zoneLines = ZONE_IDS.map(function (z) {
+          const online = !!d4Online[z];
+          const seen = d4LastSeen[z]
+            ? d4LastSeen[z].toLocaleTimeString('zh-CN', { hour12: false })
+            : '—';
+          return '<div class="d4-line ' + (online ? 'on' : 'off') + '">' +
+            ZONES[z].name + '（' + z + '）：' + (online ? '在线' : '离线') +
+            ' · lastSeen ' + seen + '</div>';
+        }).join('');
+        $el.innerHTML = brokerLine + zoneLines;
+      }
+
+      // 每秒巡检：超过阈值无新数据 → 节点离线（灰显 + 日志）
+      function d4Tick() {
+        const now = Date.now();
+        let changed = false;
+        ZONE_IDS.forEach(function (z) {
+          const online = !!d4LastSeen[z] && (now - d4LastSeen[z].getTime()) <= D4_OFFLINE_THRESHOLD;
+          if (online !== d4Online[z]) {
+            d4Online[z] = online;
+            changed = true;
+            console.log('[AirGuard] D4 故障日志: [' + (online ? '链路恢复' : '节点断流') + '] ' +
+              ZONES[z].name + (online ? ' 节点恢复上报数据' : ' 超过 ' + (D4_OFFLINE_THRESHOLD / 60000) + ' 分钟未上报数据，节点离线'));
+          }
+        });
+        if (changed) {
+          updateScene();      // 离线模型灰显 / 恢复后重新着色
+          renderD3Panel();    // 离线事件冻结
+          renderD2Panel();    // 离线节点退出优先关注
+        }
+        renderD4Panel();
+      }
+
+      // 手动重连：断开当前连接后由 mqtt.js 自动重建
+      function d4ManualReconnect() {
+        console.log('[AirGuard] D4 故障日志: [人工重连] 用户点击手动重连按钮');
+        try { client.end(true); } catch (e) { /* 忽略断开异常 */ }
+        setTimeout(function () { client.reconnect(); }, 300);
       }
 
       // ============ 钟盘纹理（教学区钟楼） ============
@@ -1222,6 +1318,14 @@
         return zone + '|' + payload.time + '|' + [payload.pm25, payload.co2, payload.crowdLevel].join(',');
       }
 
+      // D4：环境报文合法性校验（pm25 / co2 / crowdLevel 必须为数值）
+      function isValidEnvPayload(p) {
+        return p && typeof p === 'object' && !Array.isArray(p) &&
+          p.pm25 !== undefined && p.pm25 !== null && p.pm25 !== '' && !isNaN(Number(p.pm25)) &&
+          p.co2 !== undefined && p.co2 !== null && p.co2 !== '' && !isNaN(Number(p.co2)) &&
+          p.crowdLevel !== undefined && p.crowdLevel !== null && p.crowdLevel !== '' && !isNaN(Number(p.crowdLevel));
+      }
+
       // ============ 消息处理 ============
       function onEnvMessage(topic, payload) {
         const zone = resolveZone(topic, payload);
@@ -1249,6 +1353,13 @@
         }
         zoneLastMsgKey[zone] = dedupKey;
         zoneLastMsgTime[zone] = msgTime || lastTime;
+
+        // D4：非法报文过滤（字段缺失 / 非数值），丢弃且不崩溃
+        if (!isValidEnvPayload(payload)) {
+          console.error('[AirGuard] 报文格式错误:', payload);
+          return;
+        }
+        d4LastSeen[zone] = new Date(); // 更新节点 lastSeen
 
         const status = calcStatus(payload.pm25, payload.co2);
         // 只更新对应 zone，绝不写入其他区域
@@ -1306,7 +1417,7 @@
           else onEnvMessage(topic, payload);
         } catch (e) {
           // 错误 JSON 不崩溃页面，仅控制台输出
-          console.error('[AirGuard] 消息解析失败:', e);
+          console.error('[AirGuard] 报文格式错误（JSON 解析失败）:', e);
         }
       });
 
@@ -1322,9 +1433,14 @@
         if (clockFace) drawClock(clockFace);
       }, 30000);
 
+      // D4：每秒巡检节点在线状态；手动重连按钮
+      setInterval(d4Tick, 1000);
+      document.getElementById('btn-reconnect').addEventListener('click', d4ManualReconnect);
+
       renderPanel(); // 初始：三区域均为「暂无实时数据」，建筑墙体灰色
       renderD2Panel(); // 初始：无优先关注区域
       renderD3Panel(); // 初始：三区域均无事件
+      renderD4Panel(); // 初始：MQTT 断开 + 三区域离线
     })();
   </script>
 </body>
