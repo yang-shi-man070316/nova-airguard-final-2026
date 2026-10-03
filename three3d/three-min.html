@@ -104,12 +104,14 @@
     }
     .zi-metrics { list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
     .zi-metrics li { font-size: 12px; color: var(--muted); }
+    .zi-metrics .full { grid-column: 1 / -1; }
     .zi-metrics b {
       display: block;
       font-size: 14px;
       color: var(--text);
       font-weight: 600;
     }
+    .zi-metrics .full b { font-size: 12px; font-weight: 500; }
     .zi-empty { color: var(--muted); font-size: 13px; }
 
     .canvas-wrap {
@@ -214,6 +216,21 @@
 
       const CROWD_LEVELS = { 0: '稀疏', 1: '正常', 2: '拥挤', 3: '严重拥挤' };
 
+      // 风险强度（热力图透明度依据）与处置过程文案（任务书：热力图/色彩表达风险、状态、处置过程）
+      const RISK_SCORE = { '重度污染': 4, '轻度污染': 2.5, '通风不足风险': 3, '正常': 0.5 };
+      const DISPOSALS = {
+        '正常': '常规监测，无需处置',
+        '轻度污染': '提醒通风 · 敏感人群减少停留',
+        '重度污染': '开启净化 · 疏散户外人群',
+        '通风不足风险': '开启新风 / 开窗通风',
+      };
+      // 区域 → 空间对象对应关系（楼栋 / 通道 / 操场 / 食堂窗口）
+      const ZONE_OBJECTS = {
+        'zone-n': '宿舍楼栋 · 通道',
+        'zone-s': '教学楼 · 操场 · 通道',
+        'zone-w': '食堂 · 售卖窗口 · 通道',
+      };
+
       // ============ DOM ============
       const $conn = document.getElementById('conn');
       const $connText = document.getElementById('conn-text');
@@ -254,6 +271,7 @@
       let scene, camera, renderer;
       const buildings = {}; // zone → { group, walls }（建筑组 + 随状态变色的墙体贴图）
       let clockFace = null; // 教学区钟楼钟盘纹理（每 30 秒对时）
+      const heatSpots = {}; // zone → 地面风险热力光斑（径向渐变 Canvas 贴图）
       const labels = {};    // zone → 文字标签
       const TARGET = new THREE.Vector3(0, 3, 0);
       let theta = 0.8, phi = 1.05, radius = 34; // 轨道参数：水平角 / 俯仰角 / 距离
@@ -312,11 +330,20 @@
           stub.receiveShadow = true;
           scene.add(stub);
         });
+        // 教学区 → 操场通道
+        const fieldPath = mesh(new THREE.BoxGeometry(1.2, 0.02, 11.2), lambert(0xeee3cc), 0, 0.011, -0.95);
+        fieldPath.castShadow = false;
+        fieldPath.receiveShadow = true;
+        scene.add(fieldPath);
 
-        // 低多边形树木与灌木（环绕布置，不遮挡建筑）
+        // 操场（教学区对应空间对象）：椭圆形跑道 + 绿色内场
+        scene.add(buildPlayground());
+
+        // 低多边形树木与灌木（环绕布置，不遮挡建筑，避开操场）
         const TREES = [
-          [-18, -6.5, 1.0], [-13, -7.0, 1.15], [-7, -6.5, 0.9],
-          [7, -6.5, 0.9], [13, -7.0, 1.15], [18, -6.5, 1.0],
+          [-18, -6.5, 1.0], [-13, -7.0, 1.15], [-7, -17.0, 0.9],
+          [7, -17.0, 0.9], [13, -7.0, 1.15], [18, -6.5, 1.0],
+          [-9.5, -11.0, 0.95], [9.5, -11.0, 0.95],
           [-14, 8.8, 1.1], [0, 8.8, 1.25], [14, 8.8, 1.1],
           [-23, 1, 0.85], [23, 1, 0.85],
         ];
@@ -334,7 +361,7 @@
 
         // 三个特色建筑：左宿舍区、中教学区、右食堂区；顶部为 2D 文字标签
         const POS = { 'zone-n': -14, 'zone-s': 0, 'zone-w': 14 };
-        const LABEL_Y = { 'zone-n': 7.0, 'zone-s': 13.6, 'zone-w': 7.4 };
+        const LABEL_Y = { 'zone-n': 6.8, 'zone-s': 14.4, 'zone-w': 8.9 };
         const BUILDERS = { 'zone-n': buildDormitory, 'zone-s': buildTeaching, 'zone-w': buildCanteen };
         ZONE_IDS.forEach(function (z) {
           const b = BUILDERS[z]();
@@ -345,6 +372,11 @@
           labels[z] = makeLabel();
           labels[z].sprite.position.set(POS[z], LABEL_Y[z], 0);
           scene.add(labels[z].sprite);
+
+          // 地面风险热力光斑（初始无数据，透明）
+          heatSpots[z] = makeHeatSpot();
+          heatSpots[z].mesh.position.set(POS[z], 0.015, 0);
+          scene.add(heatSpots[z].mesh);
         });
 
         // 自定义简单控制器：拖拽旋转 + 滚轮缩放
@@ -386,7 +418,7 @@
       function makeLabel() {
         const canvas = document.createElement('canvas');
         canvas.width = 512;
-        canvas.height = 160;
+        canvas.height = 224;
         const texture = new THREE.CanvasTexture(canvas);
         texture.minFilter = THREE.LinearFilter;
         const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -394,21 +426,27 @@
           depthTest: false,
           transparent: true,
         }));
-        sprite.scale.set(11, 11 * 160 / 512, 1);
+        sprite.scale.set(10, 10 * 224 / 512, 1);
         return { canvas: canvas, texture: texture, sprite: sprite };
       }
 
       function updateLabel(label, zone, d) {
         const ctx = label.canvas.getContext('2d');
-        ctx.clearRect(0, 0, 512, 160);
+        ctx.clearRect(0, 0, 512, 224);
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
+        // 第一行：区域名；第二行：状态（按状态色）；第三行：处置过程
         ctx.font = 'bold 44px "Microsoft YaHei", "Segoe UI", sans-serif';
         ctx.fillStyle = '#1f2937';
-        ctx.fillText(ZONES[zone].name, 256, 50);
+        ctx.fillText(ZONES[zone].name, 256, 46);
         ctx.font = 'bold 38px "Microsoft YaHei", "Segoe UI", sans-serif';
         ctx.fillStyle = d ? (STATUS_ACCENT[d.status] || WAIT_ACCENT) : WAIT_ACCENT;
-        ctx.fillText(d ? d.status : '暂无数据', 256, 112);
+        ctx.fillText(d ? d.status : '暂无数据', 256, 98);
+        ctx.font = '26px "Microsoft YaHei", "Segoe UI", sans-serif';
+        ctx.fillStyle = '#37474f';
+        if (d) {
+          ctx.fillText(DISPOSALS[d.status] || '—', 256, 152);
+        }
         label.texture.needsUpdate = true;
       }
 
@@ -421,6 +459,8 @@
             : WAIT_COLOR;
           // 重绘该区域所有墙体贴图（换色），屋顶/底座保持中性色
           buildings[z].walls.forEach(function (w) { repaintWall(w, hex); });
+          // 地面热力光斑同步表达风险
+          updateHeatSpot(heatSpots[z], d);
           updateLabel(labels[z], z, d);
         });
       }
@@ -477,6 +517,95 @@
         g.add(mesh(new THREE.ConeGeometry(0.6, 1.2, 7), lambert(0x81c784), 0, 2.3, 0));
         g.scale.setScalar(s);
         return g;
+      }
+
+      function buildPlayground() {
+        const group = new THREE.Group();
+
+        // 椭圆形环形跑道：外椭圆挖去内椭圆，挤压成薄环
+        const trackShape = new THREE.Shape();
+        trackShape.absellipse(0, 0, 9, 5.6, 0, Math.PI * 2, false);
+        const trackHole = new THREE.Path();
+        trackHole.absellipse(0, 0, 6.2, 3.2, 0, Math.PI * 2, true);
+        trackShape.holes.push(trackHole);
+        const track = mesh(
+          new THREE.ExtrudeGeometry(trackShape, { depth: 0.06, bevelEnabled: false }),
+          lambert(0xc88b7a), 0, 0, 0
+        );
+        track.rotation.x = -Math.PI / 2; // 挤压方向转至竖直向上
+        group.add(track);
+
+        // 跑道内圈整片草皮（椭圆，填满内圈不留空地）
+        const infieldShape = new THREE.Shape();
+        infieldShape.absellipse(0, 0, 6.15, 3.15, 0, Math.PI * 2, false);
+        const infield = mesh(new THREE.ShapeGeometry(infieldShape), lambert(0x7cb96e), 0, 0.066, 0);
+        infield.rotation.x = -Math.PI / 2;
+        group.add(infield);
+
+        // 足球场白线：矩形边线 + 中线
+        const lineShape = new THREE.Shape();
+        lineShape.moveTo(-4.0, -2.25);
+        lineShape.lineTo(4.0, -2.25);
+        lineShape.lineTo(4.0, 2.25);
+        lineShape.lineTo(-4.0, 2.25);
+        lineShape.closePath();
+        const lineHole = new THREE.Path();
+        lineHole.moveTo(-3.94, -2.19);
+        lineHole.lineTo(-3.94, 2.19);
+        lineHole.lineTo(3.94, 2.19);
+        lineHole.lineTo(3.94, -2.19);
+        lineHole.closePath();
+        lineShape.holes.push(lineHole);
+        const line = mesh(
+          new THREE.ExtrudeGeometry(lineShape, { depth: 0.005, bevelEnabled: false }),
+          lambert(0xf5f5f5), 0, 0.066, 0
+        );
+        line.rotation.x = -Math.PI / 2;
+        group.add(line);
+        group.add(mesh(new THREE.BoxGeometry(0.06, 0.004, 4.5), lambert(0xf5f5f5), 0, 0.068, 0));
+
+        group.position.set(0, 0, -11);
+        return group;
+      }
+
+      // ============ 地面风险热力光斑（径向渐变，用热力图表达风险与状态） ============
+      function rgba(hex, a) {
+        const n = parseInt(hex.slice(1), 16);
+        return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+      }
+
+      function makeHeatSpot() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 256;
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.minFilter = THREE.LinearFilter;
+        const spotMesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(13, 13),
+          new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false })
+        );
+        spotMesh.rotation.x = -Math.PI / 2;
+        return { canvas: canvas, texture: texture, mesh: spotMesh };
+      }
+
+      function updateHeatSpot(spot, d) {
+        const ctx = spot.canvas.getContext('2d');
+        ctx.clearRect(0, 0, 256, 256);
+        if (!d) {
+          spot.texture.needsUpdate = true;
+          return;
+        }
+        // 风险强度 = 状态严重度 + 人流，映射为光斑透明度
+        const sev = RISK_SCORE[d.status] !== undefined ? RISK_SCORE[d.status] : 0.5;
+        const crowd = Number(d.crowdLevel) >= 0 ? Number(d.crowdLevel) : 0;
+        const alpha = Math.min(0.85, 0.18 + (sev + crowd * 0.8) * 0.13);
+        const color = STATUS_ACCENT[d.status] || WAIT_ACCENT;
+        const g = ctx.createRadialGradient(128, 128, 8, 128, 128, 122);
+        g.addColorStop(0, rgba(color, alpha));
+        g.addColorStop(1, rgba(color, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, 256, 256);
+        spot.texture.needsUpdate = true;
       }
 
       // ============ 钟盘纹理（教学区钟楼） ============
@@ -636,6 +765,13 @@
         // 烟囱（从坡面穿出）
         group.add(mesh(new THREE.CylinderGeometry(0.35, 0.45, 1.5, 12), lambert(0x90a4ae), 2.5, 5.7, -0.8));
 
+        // 食堂窗口：正立面一排售卖窗口 + 遮阳棚（空间对象对应：食堂窗口）
+        const winGeom = new THREE.BoxGeometry(0.9, 0.75, 0.12);
+        [-3.4, -1.13, 1.13, 3.4].forEach(function (x) {
+          group.add(mesh(winGeom, lambert(0xffcc80), x, 1.15, 3.06));
+        });
+        group.add(mesh(new THREE.BoxGeometry(9.6, 0.08, 0.9), lambert(0xff8a65), 0, 1.85, 3.35));
+
         addBase(group, 11, 7);
         return { group: group, walls: walls };
       }
@@ -674,6 +810,8 @@
             '<li>CO₂<b>' + fmt(d.co2) + '</b>ppm</li>' +
             '<li>人流<b>' + crowdText(d.crowdLevel) + '</b></li>' +
             '<li>上报时间<b>' + fmt(d.time) + '</b></li>' +
+            '<li class="full">空间对象<b>' + (ZONE_OBJECTS[zone] || '—') + '</b></li>' +
+            '<li class="full">处置<b>' + (DISPOSALS[d.status] || '—') + '</b></li>' +
             '</ul>' +
             '</div>';
         }).join('');
