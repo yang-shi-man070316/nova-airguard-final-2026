@@ -114,6 +114,13 @@
     .zi-metrics .full b { font-size: 12px; font-weight: 500; }
     .zi-empty { color: var(--muted); font-size: 13px; }
 
+    /* ===== D2 优先关注（左侧面板） ===== */
+    .d2-title { margin-top: 16px; }
+    #d2-priority { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+    #d2-priority .d2-win { color: #c62828; }
+    #d2-priority .d2-none { color: var(--muted); font-weight: 400; }
+    #d2-reason { font-size: 12px; color: var(--muted); line-height: 1.6; }
+
     .canvas-wrap {
       flex: 1;
       min-width: 0;
@@ -166,6 +173,11 @@
     <aside class="side-panel">
       <h2>区域实时数据</h2>
       <div id="zone-panel"></div>
+
+      <!-- D2 持续风险与优先关注：优先区域建筑会在 3D 场景中闪烁标记 -->
+      <h2 class="d2-title">D2 优先关注<span class="tag">D2</span></h2>
+      <div id="d2-priority"></div>
+      <div id="d2-reason"></div>
     </aside>
     <section class="canvas-wrap" id="canvas-wrap">
       <div id="three-fallback" class="placeholder" style="display:none">Three.js CDN 加载失败，请检查网络后刷新</div>
@@ -231,11 +243,28 @@
         'zone-w': '食堂 · 售卖窗口 · 通道',
       };
 
+      // ============ D2 持续风险与优先关注 ============
+      // crowdLevel 保留 source 标记：simulated / rule，置信度 1.0（规则判定直接采用上报值）
+      // 打分规则写死在程序中，可解释、可重复：更换输入数据，优先区域随之变化
+      const ENV_BASE_SCORE = { '重度污染': 10, '轻度污染': 6, '通风不足风险': 4, '正常': 0 };
+      const CROWD_BONUS_SCORE = { 0: 0, 1: 1, 2: 3, 3: 5 }; // 3（严重拥挤）在拥挤之上延展 +5
+      const PERSIST_BONUS = 2;        // 连续异常 ≥2 次的额外加成
+      const PERSIST_THRESHOLD = 2;
+      const STATUS_SEVERITY = { '重度污染': 3, '轻度污染': 2, '通风不足风险': 1, '正常': 0 };
+
+      // 每个 zone 独立的 D2 状态（连续异常计数 + 风险总分），区域数据隔离、互不干扰
+      const d2State = ZONE_IDS.reduce(function (acc, z) {
+        acc[z] = { anomalyCount: 0, score: 0, source: 'simulated', confidence: 1.0, review: false };
+        return acc;
+      }, {});
+
       // ============ DOM ============
       const $conn = document.getElementById('conn');
       const $connText = document.getElementById('conn-text');
       const $zonePanel = document.getElementById('zone-panel');
       const $canvasWrap = document.getElementById('canvas-wrap');
+      const $d2Priority = document.getElementById('d2-priority');
+      const $d2Reason = document.getElementById('d2-reason');
 
       // ============ status 计算（任务书顺序，仅用 pm25 / co2） ============
       function calcStatus(pm25, co2) {
@@ -273,6 +302,13 @@
       let clockFace = null; // 教学区钟楼钟盘纹理（每 30 秒对时）
       const heatSpots = {}; // zone → 地面风险热力光斑（径向渐变 Canvas 贴图）
       const labels = {};    // zone → 文字标签
+      const highlightShells = {}; // zone → D2 优先关注高亮壳（轻微闪烁标记重点区域）
+      let priorityZone = null;    // 当前优先关注区域
+      const SHELL_SIZES = {
+        'zone-n': [7.2, 5.8, 10.4],  // 宿舍区包围盒
+        'zone-s': [11.8, 13.4, 7.8], // 教学区包围盒
+        'zone-w': [11.8, 7.8, 7.8],  // 食堂区包围盒
+      };
       const TARGET = new THREE.Vector3(0, 3, 0);
       let theta = 0.8, phi = 1.05, radius = 34; // 轨道参数：水平角 / 俯仰角 / 距离
       let dragging = false, lastX = 0, lastY = 0;
@@ -377,6 +413,15 @@
           heatSpots[z] = makeHeatSpot();
           heatSpots[z].mesh.position.set(POS[z], 0.015, 0);
           scene.add(heatSpots[z].mesh);
+
+          // D2 优先关注高亮壳（透明，仅当该区域为优先关注时闪烁）
+          const shell = new THREE.Mesh(
+            new THREE.BoxGeometry(SHELL_SIZES[z][0], SHELL_SIZES[z][1], SHELL_SIZES[z][2]),
+            new THREE.MeshBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0, depthWrite: false })
+          );
+          shell.position.set(POS[z], SHELL_SIZES[z][1] / 2, 0);
+          scene.add(shell);
+          highlightShells[z] = shell;
         });
 
         // 自定义简单控制器：拖拽旋转 + 滚轮缩放
@@ -462,6 +507,12 @@
           // 地面热力光斑同步表达风险
           updateHeatSpot(heatSpots[z], d);
           updateLabel(labels[z], z, d);
+          // D2 高亮壳颜色随状态强调色（是否可见由 animate 闪烁控制）
+          if (highlightShells[z]) {
+            highlightShells[z].material.color.set(
+              d ? (STATUS_ACCENT[d.status] || WAIT_ACCENT) : WAIT_ACCENT
+            );
+          }
         });
       }
 
@@ -606,6 +657,90 @@
         ctx.fillStyle = g;
         ctx.fillRect(0, 0, 256, 256);
         spot.texture.needsUpdate = true;
+      }
+
+      // ============ D2：持续异常计数 + 可解释优先级打分 ============
+      function updateD2(zone, status, crowdLevel, source, confidence) {
+        const s = d2State[zone];
+        // 连续异常计数：status 非“正常”视为异常报文，恢复正常则清零
+        if (status !== '正常') s.anomalyCount += 1;
+        else s.anomalyCount = 0;
+
+        // source 保留与置信度规则（任务书 0.2 阈值）：
+        // - simulated / rule / review：按 README 声明规则直接使用，置信度采用来源声明值 1.0（非伪造）
+        // - model / template 等自动感知：confidence 低于 0.2 阈值或缺失 → 不得直接驱动优先处置，标注需人工复核
+        const src = source || 'simulated';
+        let conf = (confidence === undefined || confidence === null || confidence === '') ? null : Number(confidence);
+        let review = false;
+        if (src === 'simulated' || src === 'rule' || src === 'review') {
+          conf = 1.0;
+        } else if (conf === null || conf < 0.2) {
+          review = true;
+        }
+        s.source = src;
+        s.confidence = conf === null ? 0 : conf;
+        s.review = review;
+
+        // 风险分数 = 环境基础分 + 人流附加分 + 持续异常加成（需复核时人流分不计入）
+        const crowdBonus = review ? 0 :
+          (CROWD_BONUS_SCORE[Number(crowdLevel)] !== undefined ? CROWD_BONUS_SCORE[Number(crowdLevel)] : 0);
+        let score = (ENV_BASE_SCORE[status] !== undefined ? ENV_BASE_SCORE[status] : 0) + crowdBonus;
+        if (s.anomalyCount >= PERSIST_THRESHOLD) score += PERSIST_BONUS;
+        s.score = score;
+      }
+
+      // 选出当前优先关注区域：总分高者优先；同分比连续异常次数；再同分按状态严重度
+      function calcPriority() {
+        const abnormal = ZONE_IDS.map(function (z) {
+          const d = zoneState[z];
+          return {
+            zone: z,
+            status: d ? d.status : '—',
+            crowdLevel: d ? d.crowdLevel : null,
+            anomalyCount: d2State[z].anomalyCount,
+            score: d2State[z].score,
+            review: d2State[z].review,
+            abnormal: !!(d && d.status !== '正常'),
+          };
+        }).filter(function (e) { return e.abnormal; });
+        if (abnormal.length === 0) return null; // 全部正常 → 无优先关注区域
+        abnormal.sort(function (a, b) {
+          if (b.score !== a.score) return b.score - a.score;
+          if (b.anomalyCount !== a.anomalyCount) return b.anomalyCount - a.anomalyCount;
+          return (STATUS_SEVERITY[b.status] || 0) - (STATUS_SEVERITY[a.status] || 0);
+        });
+        return abnormal[0];
+      }
+
+      // 判定理由：依据实际打分过程自动生成，可解释
+      function buildPriorityReason(winner) {
+        const reasons = [];
+        reasons.push('综合风险得分最高（' + winner.score + ' 分），更值得优先处理');
+        if (winner.review) reasons.push('人流数据置信度低于阈值，需人工复核');
+        if (winner.status === '重度污染') reasons.push('环境状态严重度更高');
+        if (Number(winner.crowdLevel) >= 2) reasons.push('人流密度等级更高（' + crowdText(winner.crowdLevel) + '）');
+        if (winner.anomalyCount >= PERSIST_THRESHOLD) reasons.push('环境异常持续更久（已连续 ' + winner.anomalyCount + ' 次异常）');
+        return reasons.join('；');
+      }
+
+      // 左侧面板 D2 模块：当前优先关注区域 + 判定理由
+      function renderD2Panel() {
+        const winner = calcPriority();
+        if (!winner) {
+          $d2Priority.innerHTML = '<span class="d2-none">所有区域状态正常，无优先关注区域</span>';
+          $d2Reason.textContent = '';
+          return;
+        }
+        $d2Priority.innerHTML = '当前优先关注：<span class="d2-win">' +
+          ZONES[winner.zone].name + '（' + winner.zone + '）</span>' +
+          (winner.review ? '<span class="d2-win">（人流数据需人工复核）</span>' : '');
+        $d2Reason.textContent = '判定理由：' + buildPriorityReason(winner);
+      }
+
+      // 3D 闪烁标记：让优先关注区域的高亮壳可见（其余隐藏）
+      function updateD2Markers() {
+        const winner = calcPriority();
+        priorityZone = winner ? winner.zone : null;
       }
 
       // ============ 钟盘纹理（教学区钟楼） ============
@@ -778,6 +913,16 @@
 
       function animate() {
         requestAnimationFrame(animate);
+        // D2 优先关注建筑高亮壳：轻微闪烁（透明度正弦波动）
+        ZONE_IDS.forEach(function (z) {
+          const shell = highlightShells[z];
+          if (!shell) return;
+          if (priorityZone === z) {
+            shell.material.opacity = 0.10 + 0.14 * (0.5 + 0.5 * Math.sin(performance.now() * 0.004));
+          } else {
+            shell.material.opacity = 0;
+          }
+        });
         camera.position.set(
           TARGET.x + radius * Math.sin(phi) * Math.sin(theta),
           TARGET.y + radius * Math.cos(phi),
@@ -831,11 +976,19 @@
           pm25: payload.pm25,
           co2: payload.co2,
           crowdLevel: payload.crowdLevel,
+          // crowdLevel 保留 source / confidence（报文可选字段，缺失按 README 声明默认处理）
+          crowdSource: payload.crowdSource || 'simulated',
+          crowdConfidence: (payload.crowdConfidence === undefined || payload.crowdConfidence === null || payload.crowdConfidence === '')
+            ? null : Number(payload.crowdConfidence),
           time: payload.time,
           status: status,
           receivedAt: new Date(),
         };
+        // D2：更新连续异常计数与风险总分，刷新面板与 3D 闪烁标记
+        updateD2(zone, status, payload.crowdLevel, payload.crowdSource, payload.crowdConfidence);
         renderPanel();
+        renderD2Panel();
+        updateD2Markers();
         updateScene();
       }
 
@@ -881,6 +1034,7 @@
       }, 30000);
 
       renderPanel(); // 初始：三区域均为「暂无实时数据」，建筑墙体灰色
+      renderD2Panel(); // 初始：无优先关注区域
     })();
   </script>
 </body>

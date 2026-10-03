@@ -211,9 +211,24 @@
     .ev-time { font-family: Consolas, monospace; color: var(--muted); margin-right: 8px; font-size: 12px; }
     .ev-zone { font-weight: 600; }
 
+    /* ===== D2 持续风险与优先关注 ===== */
+    #panel-d2 { grid-column: 1 / -1; }
+    .d2-priority { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+    .d2-priority .win-name { color: #c62828; }
+    .d2-reason { font-size: 13px; color: var(--muted); margin-bottom: 12px; line-height: 1.6; }
+    .d2-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .d2-table th, .d2-table td {
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      text-align: center;
+    }
+    .d2-table th { background: #f8fafc; color: var(--muted); font-weight: 600; }
+    .d2-table tr.winner td { background: #fff8e6; font-weight: 600; }
+
     @media (max-width: 960px) {
       .layout { grid-template-columns: 1fr; }
       #panel-overview { grid-column: auto; }
+      #panel-d2 { grid-column: auto; }
       .overview-grid { grid-template-columns: 1fr; }
     }
   </style>
@@ -264,7 +279,7 @@
         </div>
         <div>
           <h3>优先关注区域</h3>
-          <!-- D2 预留容器：优先关注区域计算逻辑后续接入，结果渲染到此容器 -->
+          <!-- D2 容器：渲染当前优先关注区域（calcPriority 结果） -->
           <div id="priority-zone" class="placeholder">待接入 D2 优先关注区域计算逻辑</div>
         </div>
         <div>
@@ -273,6 +288,21 @@
           <ul id="event-list"></ul>
         </div>
       </div>
+    </section>
+
+    <!-- ===== 下方：D2 持续风险与优先关注 ===== -->
+    <section class="panel" id="panel-d2">
+      <div class="panel-head">
+        <h2>D2 持续风险与优先关注<span class="tag">D2</span></h2>
+      </div>
+      <div id="d2-priority" class="d2-priority"></div>
+      <p id="d2-reason" class="d2-reason"></p>
+      <table class="d2-table">
+        <thead>
+          <tr><th>区域</th><th>当前总分</th><th>连续异常次数</th><th>环境 status</th><th>crowdLevel</th><th>来源 / 置信度</th><th>标注</th></tr>
+        </thead>
+        <tbody id="d2-tbody"></tbody>
+      </table>
     </section>
   </main>
 
@@ -317,6 +347,21 @@
       // crowdLevel → 中文文案（仅展示，不参与 status 计算）
       const CROWD_LEVELS = { 0: '稀疏', 1: '正常', 2: '拥挤', 3: '严重拥挤' };
 
+      // ============ D2 持续风险与优先关注 ============
+      // crowdLevel 保留 source 标记：simulated / rule，置信度 1.0（规则判定直接采用上报值）
+      // 打分规则写死在程序中，可解释、可重复：更换输入数据，优先区域随之变化
+      const ENV_BASE_SCORE = { '重度污染': 10, '轻度污染': 6, '通风不足风险': 4, '正常': 0 };
+      const CROWD_BONUS_SCORE = { 0: 0, 1: 1, 2: 3, 3: 5 }; // 3（严重拥挤）在拥挤之上延展 +5
+      const PERSIST_BONUS = 2;        // 连续异常 ≥2 次的额外加成
+      const PERSIST_THRESHOLD = 2;
+      const STATUS_SEVERITY = { '重度污染': 3, '轻度污染': 2, '通风不足风险': 1, '正常': 0 };
+
+      // 每个 zone 独立的 D2 状态（连续异常计数 + 风险总分），区域数据隔离、互不干扰
+      const d2State = ZONE_IDS.reduce(function (acc, z) {
+        acc[z] = { anomalyCount: 0, score: 0, source: 'simulated', confidence: 1.0, review: false };
+        return acc;
+      }, {});
+
       // 简易事件记录（D3 状态机后续迭代，当前仅记录异常状态变化）
       const eventLog = [];
       const EVENT_LOG_MAX = 100;
@@ -329,6 +374,10 @@
       const $map3d = document.getElementById('map3d');
       const $zoneSummary = document.getElementById('zone-summary');
       const $eventList = document.getElementById('event-list');
+      const $priorityZone = document.getElementById('priority-zone');
+      const $d2Priority = document.getElementById('d2-priority');
+      const $d2Reason = document.getElementById('d2-reason');
+      const $d2Tbody = document.getElementById('d2-tbody');
 
       // ============ status 计算（任务书：按顺序判定，仅用 pm25 / co2） ============
       function calcStatus(pm25, co2) {
@@ -378,10 +427,17 @@
           pm25: payload.pm25,
           co2: payload.co2,
           crowdLevel: payload.crowdLevel,
+          // crowdLevel 保留 source / confidence（报文可选字段，缺失按 README 声明默认处理）
+          crowdSource: payload.crowdSource || 'simulated',
+          crowdConfidence: (payload.crowdConfidence === undefined || payload.crowdConfidence === null || payload.crowdConfidence === '')
+            ? null : Number(payload.crowdConfidence),
           time: payload.time,
           status: status,
           receivedAt: new Date(),
         };
+        // D2：更新该 zone 的连续异常计数与风险总分（区域独立）
+        updateD2(zone, status, payload.crowdLevel, payload.crowdSource, payload.crowdConfidence);
+
         // 简易事件记录：仅当状态变为异常（非“正常”）时追加一条，避免重复消息刷屏
         if (status !== '正常' && (!prev || prev.status !== status)) {
           eventLog.push({
@@ -402,6 +458,7 @@
         renderMonitor();
         renderMap3D();
         renderOverview();
+        renderD2();
       }
 
       function renderTopbar() {
@@ -480,7 +537,99 @@
         }).join('');
       }
 
-      // TODO(D2): 优先关注区域计算逻辑后续在此接入，结果渲染到 #priority-zone 容器
+      // ============ D2：持续异常计数 + 可解释优先级打分 ============
+      function updateD2(zone, status, crowdLevel, source, confidence) {
+        const s = d2State[zone];
+        // 连续异常计数：status 非“正常”视为异常报文，恢复正常则清零
+        if (status !== '正常') s.anomalyCount += 1;
+        else s.anomalyCount = 0;
+
+        // source 保留与置信度规则（任务书 0.2 阈值）：
+        // - simulated / rule / review：按 README 声明规则直接使用，置信度采用来源声明值 1.0（非伪造）
+        // - model / template 等自动感知：confidence 低于 0.2 阈值或缺失 → 不得直接驱动优先处置，标注需人工复核
+        const src = source || 'simulated';
+        let conf = (confidence === undefined || confidence === null || confidence === '') ? null : Number(confidence);
+        let review = false;
+        if (src === 'simulated' || src === 'rule' || src === 'review') {
+          conf = 1.0;
+        } else if (conf === null || conf < 0.2) {
+          review = true;
+        }
+        s.source = src;
+        s.confidence = conf === null ? 0 : conf;
+        s.review = review;
+
+        // 风险分数 = 环境基础分 + 人流附加分 + 持续异常加成（需复核时人流分不计入）
+        const crowdBonus = review ? 0 :
+          (CROWD_BONUS_SCORE[Number(crowdLevel)] !== undefined ? CROWD_BONUS_SCORE[Number(crowdLevel)] : 0);
+        let score = (ENV_BASE_SCORE[status] !== undefined ? ENV_BASE_SCORE[status] : 0) + crowdBonus;
+        if (s.anomalyCount >= PERSIST_THRESHOLD) score += PERSIST_BONUS;
+        s.score = score;
+      }
+
+      // 选出当前优先关注区域：总分高者优先；同分比连续异常次数；再同分按状态严重度
+      function calcPriority() {
+        const abnormal = ZONE_IDS.map(function (z) {
+          const d = zoneState[z];
+          return {
+            zone: z,
+            status: d ? d.status : '—',
+            crowdLevel: d ? d.crowdLevel : null,
+            anomalyCount: d2State[z].anomalyCount,
+            score: d2State[z].score,
+            review: d2State[z].review,
+            abnormal: !!(d && d.status !== '正常'),
+          };
+        }).filter(function (e) { return e.abnormal; });
+        if (abnormal.length === 0) return null; // 全部正常 → 无优先关注区域
+        abnormal.sort(function (a, b) {
+          if (b.score !== a.score) return b.score - a.score;
+          if (b.anomalyCount !== a.anomalyCount) return b.anomalyCount - a.anomalyCount;
+          return (STATUS_SEVERITY[b.status] || 0) - (STATUS_SEVERITY[a.status] || 0);
+        });
+        return abnormal[0];
+      }
+
+      // 判定理由：依据实际打分过程自动生成，可解释
+      function buildPriorityReason(winner) {
+        const reasons = [];
+        reasons.push('综合风险得分最高（' + winner.score + ' 分），更值得优先处理');
+        if (winner.review) reasons.push('人流数据置信度低于阈值，需人工复核');
+        if (winner.status === '重度污染') reasons.push('环境状态严重度更高');
+        if (Number(winner.crowdLevel) >= 2) reasons.push('人流密度等级更高（' + crowdText(winner.crowdLevel) + '）');
+        if (winner.anomalyCount >= PERSIST_THRESHOLD) reasons.push('环境异常持续更久（已连续 ' + winner.anomalyCount + ' 次异常）');
+        return reasons.join('；');
+      }
+
+      function renderD2() {
+        const winner = calcPriority();
+        if (!winner) {
+          $priorityZone.innerHTML = '所有区域状态正常，无优先关注区域';
+          $d2Priority.innerHTML = '';
+          $d2Reason.textContent = '';
+        } else {
+          const reviewMark = winner.review ? ' <span class="win-name">（人流数据需人工复核）</span>' : '';
+          $priorityZone.innerHTML = '当前优先关注：<b>' + ZONES[winner.zone].name + '</b>（' + winner.zone + '）' + reviewMark;
+          $d2Priority.innerHTML = '当前优先关注：<span class="win-name">' +
+            ZONES[winner.zone].name + '（' + winner.zone + '）</span>' + reviewMark;
+          $d2Reason.textContent = '判定理由：' + buildPriorityReason(winner);
+        }
+        $d2Tbody.innerHTML = ZONE_IDS.map(function (z) {
+          const d = zoneState[z];
+          const s = d2State[z];
+          const isWin = winner && winner.zone === z;
+          return '<tr' + (isWin ? ' class="winner"' : '') + '>' +
+            '<td>' + ZONES[z].name + '（' + z + '）</td>' +
+            '<td>' + s.score + '</td>' +
+            '<td>' + s.anomalyCount + '</td>' +
+            '<td>' + (d ? d.status : '—') + '</td>' +
+            '<td>' + (d ? crowdText(d.crowdLevel) : '—') + '</td>' +
+            '<td>' + s.source + ' / ' + s.confidence + '</td>' +
+            '<td>' + (s.review ? '需人工复核' : '—') + '</td>' +
+            '</tr>';
+        }).join('');
+      }
+
       // TODO(D3): 事件状态机后续在此扩展（事件分级、去重、生命周期管理等）
 
       // E1 预览面板按钮：跳转独立 3D 数字孪生页面（three-min.html）
