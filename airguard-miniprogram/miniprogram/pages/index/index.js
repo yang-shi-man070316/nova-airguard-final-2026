@@ -12,6 +12,7 @@ const ACCENT_COLORS = {
   green: '#22c55e',
   orange: '#f59e0b',
   red: '#ef4444',
+  purple: '#9c27b0', // 通风不足风险（与全端统一判级规则一致）
   gray: '#9ca3af',
 };
 
@@ -288,7 +289,7 @@ Page({
     if (this.client) this.client.end();
   },
 
-  // 处理单条环境报文：{"zoneid":"zone-n","pm25":160,"co2":920,"crowdLevel":3,"time":"..."}
+  // 处理单条环境报文：{"zoneId":"zone-n","pm25":160,"co2":920,"crowdLevel":3,"time":"..."}
   handleMsg: function (topic, payload) {
     let msg;
     try {
@@ -297,23 +298,26 @@ Page({
       console.error('[AirGuard] 报文解析失败:', e, payload);
       return;
     }
-    const zoneid = msg.zoneid; // 报文契约字段为小写 zoneid
+    const zoneid = msg.zoneId || msg.zoneid; // 统一契约：zoneId（大写 I），兼容小写 zoneid
     if (['zone-n', 'zone-s', 'zone-w'].indexOf(zoneid) < 0) {
       console.warn('[AirGuard] 未知区域消息，已忽略:', topic);
       return;
     }
     const pm25 = Number(msg.pm25);
+    const co2 = Number(msg.co2);
     const crowdLevel = Number(msg.crowdLevel);
 
-    // 状态判定：pm25≤75 正常绿色；75<pm25≤150 轻度污染橙色；pm25>150 重度污染红色
+    // 状态判定（与全端统一判级规则一致，仅用 pm25 / co2）：
+    // pm25>150 重度污染；pm25>75 轻度污染；co2≥1500 通风不足风险；其余 正常
     let statusText = '正常', tagClass = 'green';
     if (pm25 > 150) { statusText = '重度污染'; tagClass = 'red'; }
     else if (pm25 > 75) { statusText = '轻度污染'; tagClass = 'orange'; }
+    else if (co2 >= 1500) { statusText = '通风不足风险'; tagClass = 'purple'; }
 
-    // crowdLevel 映射：0稀疏 1适中 2拥挤 3严重拥挤
+    // crowdLevel 映射（与全端统一）：0稀疏 1正常 2拥挤 3严重拥挤
     let crowdText = '--';
     if (crowdLevel === 0) crowdText = '稀疏';
-    else if (crowdLevel === 1) crowdText = '适中';
+    else if (crowdLevel === 1) crowdText = '正常';
     else if (crowdLevel === 2) crowdText = '拥挤';
     else if (crowdLevel === 3) crowdText = '严重拥挤';
 
@@ -362,6 +366,7 @@ Page({
       };
       const heavy = list.filter(function (i) { return i.statusText === '重度污染'; });
       const light = list.filter(function (i) { return i.statusText === '轻度污染'; });
+      const vent = list.filter(function (i) { return i.statusText === '通风不足风险'; });
       const crowd3 = list.filter(function (i) { return i.crowdLevel === 3; });
       const crowd2 = list.filter(function (i) { return i.crowdLevel === 2; });
 
@@ -371,6 +376,9 @@ Page({
       } else if (light.length) {
         conclusionText = names(light) + '轻度污染，敏感人群建议减少长时间停留。';
         conclusionClass = 'orange'; conclusionIcon = '⚠️';
+      } else if (vent.length) {
+        conclusionText = names(vent) + '通风不足，建议开窗或开启新风系统。';
+        conclusionClass = 'purple'; conclusionIcon = '💨';
       } else if (crowd3.length) {
         conclusionText = names(crowd3) + '人流严重拥挤，建议错峰前往。';
         conclusionClass = 'red'; conclusionIcon = '🚨';

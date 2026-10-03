@@ -78,6 +78,7 @@
 .conclusion.green { border-left-color: #22c55e; background: #eefaf0; }
 .conclusion.orange { border-left-color: #f59e0b; background: #fff8e6; }
 .conclusion.red { border-left-color: #ef4444; background: #fff1f0; }
+.conclusion.purple { border-left-color: #9c27b0; background: #f3e5f5; }
 .conclusion-head {
   display: flex;
   align-items: center;
