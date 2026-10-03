@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AirGuard · Web 监测台（多区域实时总览）</title>
+  <!-- mqtt.js CDN（UMD 构建，暴露全局 mqtt） -->
+  <script src="https://cdn.jsdelivr.net/npm/mqtt@5/dist/mqtt.min.js"></script>
+  <!-- Chart.js CDN（趋势折线图） -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #eef1f5;
+      --panel-bg: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --nav-bg: #0f172a;
+      --wait-bg: #f5f5f5;
+      --wait-accent: #9ca3af;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      min-height: 100vh;
+    }
+
+    /* ===== 顶部导航栏 ===== */
+    .topbar {
+      background: var(--nav-bg);
+      color: #e5e7eb;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      padding: 12px 24px;
+    }
+    .topbar h1 { font-size: 18px; color: #fff; letter-spacing: .5px; }
+    .topbar .sub { font-size: 12px; color: #94a3b8; margin-top: 2px; }
+    .top-meta { display: flex; align-items: center; gap: 16px; font-size: 13px; }
+    #online-zones b { color: #60a5fa; font-size: 15px; }
+    #conn { display: inline-flex; align-items: center; gap: 6px; color: #cbd5e1; }
+    #conn .dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--wait-accent);
+    }
+    #conn.on .dot { background: #22c55e; }
+    #conn.off .dot { background: #ef4444; }
+
+    /* ===== 主体网格布局 ===== */
+    .grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      grid-template-areas:
+        "overview overview"
+        "trend focus"
+        "events heat";
+      gap: 16px;
+      padding: 16px 24px 24px;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .04);
+    }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+      margin-bottom: 14px;
+    }
+    .panel-head h2 { font-size: 15px; }
+    .panel-head .hint { font-size: 11px; color: var(--muted); }
+    .tag {
+      font-size: 11px;
+      color: #475569;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      padding: 1px 6px;
+      margin-left: 8px;
+      vertical-align: 2px;
+    }
+    .zone-id { font-size: 11px; color: var(--muted); font-family: Consolas, monospace; }
+    #panel-overview { grid-area: overview; }
+    #panel-trend { grid-area: trend; }
+    #panel-focus { grid-area: focus; }
+    #panel-heat { grid-area: heat; }
+    #panel-events { grid-area: events; }
+
+    /* ===== 多区域实时总览卡片 ===== */
+    .monitor-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }
+    .zone-card {
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--wait-accent);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--wait-bg);
+    }
+    .zone-card .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .zone-card .card-head h3 { font-size: 15px; }
+    .status-badge {
+      font-size: 12px;
+      color: #fff;
+      background: var(--wait-accent);
+      padding: 2px 9px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .metrics { list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
+    .metrics li { font-size: 12px; color: var(--muted); }
+    .metrics b {
+      display: block;
+      font-size: 15px;
+      color: var(--text);
+      font-weight: 600;
+    }
+    .metrics .time-cell {
+      grid-column: 1 / -1;
+      border-top: 1px dashed var(--border);
+      padding-top: 6px;
+      margin-top: 2px;
+    }
+    .zone-empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+
+    /* ===== 趋势面板 ===== */
+    .chart-box { position: relative; height: 170px; margin-bottom: 10px; }
+    .chart-box:last-child { margin-bottom: 0; }
+    .trend-meta { margin: -4px 0 10px; font-size: 12px; color: var(--muted); }
+
+    /* ===== 重点区域面板 ===== */
+    .focus-list { list-style: none; display: grid; gap: 12px; }
+    .focus-list li { font-size: 13px; }
+    .focus-head {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      margin-bottom: 4px;
+    }
+    .focus-head b { font-size: 14px; }
+    .focus-reason { color: var(--muted); font-size: 12px; margin-left: auto; }
+    .focus-score {
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      color: #475569;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      padding: 0 5px;
+    }
+    .focus-bar {
+      height: 6px;
+      background: #e5e7eb;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .focus-bar i { display: block; height: 100%; }
+    .placeholder {
+      border: 1px dashed #cbd5e1;
+      border-radius: 8px;
+      color: #94a3b8;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      text-align: center;
+    }
+
+    /* ===== 热力分布面板 ===== */
+    #heat-map {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      grid-auto-rows: 26px;
+      gap: 3px;
+      padding: 6px;
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .heat-cell { border-radius: 3px; }
+    .heat-label {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      font-size: 12px;
+      color: #1f2937;
+      pointer-events: none;
+      text-shadow: 0 0 4px rgba(255, 255, 255, .9);
+      line-height: 1.3;
+    }
+    .heat-label b { font-size: 11px; color: #475569; }
+    .heat-legend {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .heat-gradient {
+      flex: 1;
+      height: 8px;
+      border-radius: 4px;
+      background: linear-gradient(90deg, hsl(240, 85%, 55%), hsl(120, 85%, 45%), hsl(60, 85%, 50%), hsl(0, 85%, 55%));
+    }
+    .heat-caption { margin-top: 6px; font-size: 11px; color: var(--muted); text-align: center; }
+
+    /* ===== 事件状态面板 ===== */
+    #event-states { margin-bottom: 12px; }
+    .ev-chip {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      margin: 0 6px 6px 0;
+      border: 1px solid var(--border);
+      background: var(--wait-bg);
+      color: var(--muted);
+    }
+    #event-list { list-style: none; font-size: 13px; max-height: 210px; overflow-y: auto; }
+    #event-list li { padding: 5px 8px; border-bottom: 1px dashed var(--border); }
+    #event-list li.empty { color: var(--muted); border: none; }
+    .ev-time { font-family: Consolas, monospace; color: var(--muted); margin-right: 8px; font-size: 12px; }
+    .ev-zone { font-weight: 600; }
+
+    @media (max-width: 960px) {
+      .grid {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+          "overview"
+          "trend"
+          "focus"
+          "events"
+          "heat";
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>AirGuard · Web 监测台</h1>
+      <div class="sub">多区域实时总览 · 重点区域 · 热力分布 · 趋势 · 事件状态</div>
+    </div>
+    <div class="top-meta">
+      <span id="online-zones">在线区域 <b>0</b>/3</span>
+      <span id="conn"><span class="dot"></span><span id="conn-text">连接中…</span></span>
+    </div>
+  </header>
+
+  <main class="grid">
+    <!-- ===== 多区域实时总览（D1） ===== -->
+    <section class="panel" id="panel-overview">
+      <div class="panel-head">
+        <h2>多区域实时总览<span class="tag">D1</span></h2>
+        <span class="hint">3 区域独立状态 · 互不串数据</span>
+      </div>
+      <div id="monitor-cards" class="monitor-grid"></div>
+    </section>
+
+    <!-- ===== 历史趋势（D1） ===== -->
+    <section class="panel" id="panel-trend">
+      <div class="panel-head">
+        <h2>历史趋势<span class="tag">D1</span></h2>
+        <span class="hint">滚动窗口：最近 40 条</span>
+      </div>
+      <div id="trend-meta" class="trend-meta"></div>
+      <div class="chart-box"><canvas id="pm25-chart"></canvas></div>
+      <div class="chart-box"><canvas id="co2-chart"></canvas></div>
+      <div id="trend-fallback" class="placeholder" style="display:none">
+        趋势图表依赖 Chart.js CDN，当前加载失败（请检查网络）
+      </div>
+    </section>
+
+    <!-- ===== 重点区域（D2） ===== -->
+    <section class="panel" id="panel-focus">
+      <div class="panel-head">
+        <h2>重点区域<span class="tag">D2</span></h2>
+        <span class="hint">status 严重度 + 人流加分</span>
+      </div>
+      <!-- D2 简化实现：按打分排序展示重点区域，完整计算逻辑后续按任务书迭代 -->
+      <ol id="focus-list" class="focus-list"></ol>
+    </section>
+
+    <!-- ===== 热力分布（D2 人流热力示意） ===== -->
+    <section class="panel" id="panel-heat">
+      <div class="panel-head">
+        <h2>热力分布<span class="tag">D2</span></h2>
+      </div>
+      <div id="heat-map"></div>
+      <div class="heat-legend"><span>稀疏</span><i class="heat-gradient"></i><span>严重拥挤</span></div>
+      <p class="heat-caption">热力 = 人流等级（crowdLevel）示意</p>
+    </section>
+
+    <!-- ===== 事件状态（D3） ===== -->
+    <section class="panel" id="panel-events">
+      <div class="panel-head">
+        <h2>事件状态<span class="tag">D3</span></h2>
+        <span class="hint">异常状态自动记录</span>
+      </div>
+      <div id="event-states"></div>
+      <!-- D3 预留：事件状态机后续迭代（事件分级、去重、生命周期管理） -->
+      <ul id="event-list"></ul>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      'use strict';
+
+      // ============ 配置 ============
+      const MQTT_URL = 'ws://127.0.0.1:8083/mqtt';
+      const TOPIC = 'airguard/+/env';
+
+      // 区域配置：zoneId → 中文名
+      const ZONES = {
+        'zone-n': { name: '宿舍区' },
+        'zone-s': { name: '教学区' },
+        'zone-w': { name: '食堂区' },
+      };
+      const ZONE_IDS = Object.keys(ZONES);
+
+      // zoneState：三个区域状态独立存储，只允许按 zone 键更新，严禁串数据
+      const zoneState = ZONE_IDS.reduce(function (acc, z) { acc[z] = null; return acc; }, {});
+
+      // 趋势历史缓冲：每个区域滚动保留最近 HISTORY_MAX 条
+      const HISTORY_MAX = 40;
+      const zoneHistory = ZONE_IDS.reduce(function (acc, z) { acc[z] = []; return acc; }, {});
+
+      // 简易事件记录
+      const eventLog = [];
+      const EVENT_LOG_MAX = 100;
+
+      // status → 卡片背景色（与总视图 portal 一致）
+      const STATUS_BG = {
+        '正常': '#e8f5e9',
+        '轻度污染': '#fff8e1',
+        '重度污染': '#ffebee',
+        '通风不足风险': '#f3e5f5',
+      };
+      const STATUS_ACCENT = {
+        '正常': '#2e7d32',
+        '轻度污染': '#f57f17',
+        '重度污染': '#c62828',
+        '通风不足风险': '#7b1fa2',
+      };
+      const WAIT_BG = '#f5f5f5';
+      const WAIT_ACCENT = '#9ca3af';
+
+      // crowdLevel → 中文文案（仅展示，不参与 status 计算）
+      const CROWD_LEVELS = { 0: '稀疏', 1: '正常', 2: '拥挤', 3: '严重拥挤' };
+
+      // 重点区域打分（D2 简化启发式）
+      const SEVERITY_SCORE = { '重度污染': 4, '轻度污染': 3, '通风不足风险': 2, '正常': 1 };
+      const CROWD_SCORE = { 0: 0, 1: 0.5, 2: 1, 3: 1.5 };
+
+      // 热力分布：crowdLevel → 热力强度（0~1）
+      const CROWD_HEAT = { 0: 0.1, 1: 0.4, 2: 0.7, 3: 1 };
+
+      const CHART_COLORS = { 'zone-n': '#ef4444', 'zone-s': '#f59e0b', 'zone-w': '#3b82f6' };
+
+      // ============ DOM ============
+      const $conn = document.getElementById('conn');
+      const $connText = document.getElementById('conn-text');
+      const $onlineZones = document.getElementById('online-zones');
+      const $monitorCards = document.getElementById('monitor-cards');
+      const $focusList = document.getElementById('focus-list');
+      const $heatMap = document.getElementById('heat-map');
+      const $eventStates = document.getElementById('event-states');
+      const $eventList = document.getElementById('event-list');
+      const $trendMeta = document.getElementById('trend-meta');
+
+      // ============ status 计算（任务书：按顺序判定，仅用 pm25 / co2） ============
+      function calcStatus(pm25, co2) {
+        if (pm25 > 150) return '重度污染';
+        if (pm25 > 75) return '轻度污染';
+        if (co2 >= 1500) return '通风不足风险';
+        return '正常';
+      }
+
+      function crowdText(crowdLevel) {
+        if (crowdLevel === undefined || crowdLevel === null || crowdLevel === '') return '--';
+        const v = Number(crowdLevel);
+        return Object.prototype.hasOwnProperty.call(CROWD_LEVELS, v) ? CROWD_LEVELS[v] : crowdLevel;
+      }
+
+      const fmt = function (x) { return (x === undefined || x === null || x === '' ? '--' : x); };
+
+      // ============ 顶部连接状态指示器 ============
+      function setConn(state, text) {
+        $conn.className = state; // '' | 'on' | 'off'
+        $connText.textContent = text || (
+          state === 'on' ? '已连接 ' + MQTT_URL :
+          state === 'off' ? '连接断开，自动重连中…' : '连接中…'
+        );
+      }
+
+      // ============ 区域解析 ============
+      // 数据契约字段为 zoneId；兼容旧版小写 zoneid；都缺失时退回 topic 中间段
+      // （airguard/<zone>/env）；三者都不认识则丢弃该消息
+      function resolveZone(topic, payload) {
+        const z = (payload && (payload.zoneId || payload.zoneid)) || topic.split('/')[1] || '';
+        return Object.prototype.hasOwnProperty.call(ZONES, z) ? z : null;
+      }
+
+      // ============ 消息处理 ============
+      function onEnvMessage(topic, payload) {
+        const zone = resolveZone(topic, payload);
+        if (!zone) {
+          console.warn('[AirGuard] 未知区域消息，已忽略:', topic);
+          return;
+        }
+        const prev = zoneState[zone];
+        const status = calcStatus(payload.pm25, payload.co2);
+        const receivedAt = new Date();
+        // 只更新对应 zone 的条目，绝不写入其他区域
+        zoneState[zone] = {
+          zoneId: zone,
+          pm25: payload.pm25,
+          co2: payload.co2,
+          crowdLevel: payload.crowdLevel,
+          time: payload.time,
+          status: status,
+          receivedAt: receivedAt,
+        };
+        // 趋势历史：只追加当前 zone 自己的点
+        zoneHistory[zone].push({
+          t: receivedAt.toLocaleTimeString('zh-CN', { hour12: false }),
+          pm25: payload.pm25,
+          co2: payload.co2,
+        });
+        if (zoneHistory[zone].length > HISTORY_MAX) zoneHistory[zone].shift();
+
+        // 简易事件记录：仅当状态变为异常（非“正常”）时追加一条，避免重复消息刷屏
+        if (status !== '正常' && (!prev || prev.status !== status)) {
+          eventLog.push({
+            zone: zone, status: status,
+            pm25: payload.pm25, co2: payload.co2,
+            at: receivedAt,
+          });
+          if (eventLog.length > EVENT_LOG_MAX) {
+            eventLog.splice(0, eventLog.length - EVENT_LOG_MAX);
+          }
+        }
+        renderAll();
+      }
+
+      // ============ 渲染：所有模块同源，只读 zoneState / zoneHistory / eventLog ============
+      function renderAll() {
+        renderTopbar();
+        renderOverview();
+        renderFocus();
+        renderHeat();
+        renderEvents();
+        updateCharts();
+      }
+
+      function renderTopbar() {
+        const online = ZONE_IDS.filter(function (z) { return zoneState[z]; }).length;
+        $onlineZones.innerHTML = '在线区域 <b>' + online + '</b>/' + ZONE_IDS.length;
+      }
+
+      // D1 多区域实时总览卡片
+      function renderOverview() {
+        $monitorCards.innerHTML = ZONE_IDS.map(function (zone) {
+          const d = zoneState[zone];
+          if (!d) {
+            return '<section class="zone-card">' +
+              '<div class="card-head"><h3>' + ZONES[zone].name +
+              ' <span class="zone-id">' + zone + '</span></h3></div>' +
+              '<p class="zone-empty">暂无实时数据</p>' +
+              '</section>';
+          }
+          const bg = STATUS_BG[d.status] || WAIT_BG;
+          const accent = STATUS_ACCENT[d.status] || WAIT_ACCENT;
+          return '<section class="zone-card" style="background:' + bg + ';border-left-color:' + accent + '">' +
+            '<div class="card-head"><h3>' + ZONES[zone].name +
+            ' <span class="zone-id">' + zone + '</span></h3>' +
+            '<span class="status-badge" style="background:' + accent + '">' + d.status + '</span></div>' +
+            '<ul class="metrics">' +
+            '<li>PM2.5<b>' + fmt(d.pm25) + '</b>μg/m³</li>' +
+            '<li>CO₂<b>' + fmt(d.co2) + '</b>ppm</li>' +
+            '<li>人流等级<b>' + crowdText(d.crowdLevel) + '</b></li>' +
+            '<li>状态<b>' + d.status + '</b></li>' +
+            '<li class="time-cell">上报时间<b>' + fmt(d.time) + '</b></li>' +
+            '</ul>' +
+            '</section>';
+        }).join('');
+      }
+
+      // D2 重点区域：简易打分（status 严重度 + 人流加分），按分降序
+      function zoneScore(d) {
+        if (!d) return 0;
+        const sev = SEVERITY_SCORE[d.status] || 1;
+        const v = Number(d.crowdLevel);
+        const cw = Object.prototype.hasOwnProperty.call(CROWD_SCORE, v) ? CROWD_SCORE[v] : 0;
+        return sev + cw;
+      }
+
+      function renderFocus() {
+        const scored = ZONE_IDS.map(function (z) {
+          return { zone: z, d: zoneState[z], score: zoneScore(zoneState[z]) };
+        }).filter(function (x) { return x.d && x.score > 1.5; })
+          .sort(function (a, b) { return b.score - a.score; });
+
+        if (scored.length === 0) {
+          $focusList.innerHTML = '<div class="placeholder">当前各区域状态良好，暂无重点区域</div>';
+          return;
+        }
+        const maxScore = scored[0].score;
+        $focusList.innerHTML = scored.map(function (x) {
+          const d = x.d;
+          const reasons = [];
+          if (d.status !== '正常') reasons.push(d.status);
+          if (Number(d.crowdLevel) >= 2) reasons.push('人流' + crowdText(d.crowdLevel));
+          const accent = STATUS_ACCENT[d.status] || WAIT_ACCENT;
+          const pct = Math.max(8, Math.round(x.score / maxScore * 100));
+          return '<li>' +
+            '<div class="focus-head"><b>' + ZONES[x.zone].name + '</b>' +
+            '<span class="zone-id">' + x.zone + '</span>' +
+            '<span class="focus-reason">' + (reasons.join(' · ') || '综合关注') + '</span>' +
+            '<span class="focus-score">' + x.score.toFixed(1) + '</span></div>' +
+            '<div class="focus-bar"><i style="width:' + pct + '%;background:' + accent + '"></i></div>' +
+            '</li>';
+        }).join('');
+      }
+
+      // D2 热力分布：6×4 网格，三个区域中心做径向衰减，热力 = crowdLevel
+      const HEAT_COLS = 6;
+      const HEAT_ROWS = 4;
+      const HEAT_CENTERS = {
+        'zone-n': { x: 1.5, y: 2 },
+        'zone-s': { x: 3.5, y: 2 },
+        'zone-w': { x: 5.5, y: 2 },
+      };
+
+      function renderHeat() {
+        const cells = [];
+        for (let r = 0; r < HEAT_ROWS; r++) {
+          for (let c = 0; c < HEAT_COLS; c++) {
+            let t = 0;
+            ZONE_IDS.forEach(function (z) {
+              const d = zoneState[z];
+              const base = (d && d.crowdLevel !== undefined && d.crowdLevel !== null && d.crowdLevel !== '')
+                ? (CROWD_HEAT[Number(d.crowdLevel)] !== undefined ? CROWD_HEAT[Number(d.crowdLevel)] : 0.05)
+                : 0.03;
+              const dx = c + 0.5 - HEAT_CENTERS[z].x;
+              const dy = r + 0.5 - HEAT_CENTERS[z].y;
+              const falloff = Math.exp(-(dx * dx + dy * dy) / 2.5);
+              t = Math.max(t, base * falloff);
+            });
+            const hue = Math.round(240 - 240 * t);
+            const alpha = Math.min(1, 0.15 + t);
+            cells.push('<span class="heat-cell" style="background:hsla(' + hue + ',85%,55%,' + alpha.toFixed(2) + ')"></span>');
+          }
+        }
+        const labels = ZONE_IDS.map(function (z) {
+          const d = zoneState[z];
+          const left = (HEAT_CENTERS[z].x / HEAT_COLS * 100).toFixed(1) + '%';
+          const top = (HEAT_CENTERS[z].y / HEAT_ROWS * 100).toFixed(1) + '%';
+          return '<div class="heat-label" style="left:' + left + ';top:' + top + '">' +
+            ZONES[z].name + '<br><b>' + (d ? crowdText(d.crowdLevel) : '暂无数据') + '</b></div>';
+        });
+        $heatMap.innerHTML = cells.join('') + labels.join('');
+      }
+
+      // D3 事件状态：各区域当前状态徽章 + 异常事件记录列表
+      function renderEvents() {
+        $eventStates.innerHTML = ZONE_IDS.map(function (z) {
+          const d = zoneState[z];
+          if (!d) {
+            return '<span class="ev-chip">' + ZONES[z].name + '：暂无数据</span>';
+          }
+          if (d.status === '正常') {
+            return '<span class="ev-chip" style="background:#e8f5e9;border-color:#2e7d32;color:#2e7d32">' +
+              ZONES[z].name + '：正常</span>';
+          }
+          const accent = STATUS_ACCENT[d.status] || WAIT_ACCENT;
+          const bg = STATUS_BG[d.status] || WAIT_BG;
+          return '<span class="ev-chip" style="background:' + bg + ';border-color:' + accent + ';color:' + accent + '">' +
+            ZONES[z].name + '：' + d.status + '（事件进行中）</span>';
+        }).join('');
+
+        if (eventLog.length === 0) {
+          $eventList.innerHTML = '<li class="empty">暂无异常事件</li>';
+          return;
+        }
+        $eventList.innerHTML = eventLog.slice().reverse().map(function (ev) {
+          const t = ev.at.toLocaleTimeString('zh-CN', { hour12: false });
+          return '<li><span class="ev-time">' + t + '</span>' +
+            '<span class="ev-zone">' + ZONES[ev.zone].name + '（' + ev.zone + '）</span> → ' +
+            ev.status + '（PM2.5 ' + fmt(ev.pm25) + ' · CO₂ ' + fmt(ev.co2) + '）</li>';
+        }).join('');
+      }
+
+      // ============ 趋势图表（Chart.js） ============
+      let pm25Chart = null;
+      let co2Chart = null;
+
+      function buildCharts() {
+        if (!window.Chart) {
+          document.getElementById('trend-fallback').style.display = 'flex';
+          return;
+        }
+        const makeChart = function (canvas, unit) {
+          return new Chart(canvas, {
+            type: 'line',
+            data: {
+              labels: [],
+              datasets: ZONE_IDS.map(function (z) {
+                return {
+                  label: ZONES[z].name + '（' + z + '）',
+                  data: [],
+                  borderColor: CHART_COLORS[z],
+                  backgroundColor: CHART_COLORS[z] + '22',
+                  borderWidth: 1.5,
+                  // 数据点较少（≤5）时显示圆点，确保单条数据可见；点数增多后改为纯曲线
+                  pointRadius: function (context) {
+                    return context.chart.data.labels.length <= 5 ? 3.5 : 0;
+                  },
+                  tension: 0.3,
+                };
+              }),
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              animation: false,
+              interaction: { mode: 'nearest', intersect: false },
+              scales: {
+                x: { ticks: { maxTicksLimit: 6, font: { size: 10 } } },
+                y: { beginAtZero: true, title: { display: true, text: unit, font: { size: 10 } } },
+              },
+              plugins: { legend: { labels: { boxWidth: 12, font: { size: 11 } } } },
+            },
+          });
+        };
+        pm25Chart = makeChart(document.getElementById('pm25-chart'), 'μg/m³');
+        co2Chart = makeChart(document.getElementById('co2-chart'), 'ppm');
+      }
+
+      function updateCharts() {
+        // 各区域已积累的数据点数，便于确认趋势数据确实在流入
+        const total = ZONE_IDS.reduce(function (s, z) { return s + zoneHistory[z].length; }, 0);
+        $trendMeta.textContent = total === 0
+          ? '尚未收到趋势数据（等待 MQTT 消息…）'
+          : '已积累数据：' + ZONE_IDS.map(function (z) {
+              return ZONES[z].name + ' ' + zoneHistory[z].length + ' 点';
+            }).join(' · ') + '（点数较少时以圆点显示）';
+        if (!pm25Chart || !co2Chart) return;
+        // x 轴标签取数据最多的区域（各区域上报节奏相近）
+        const ref = ZONE_IDS.reduce(function (a, z) {
+          return zoneHistory[a].length >= zoneHistory[z].length ? a : z;
+        });
+        const labels = zoneHistory[ref].map(function (p) { return p.t; });
+        pm25Chart.data.labels = labels;
+        co2Chart.data.labels = labels;
+        ZONE_IDS.forEach(function (z, i) {
+          pm25Chart.data.datasets[i].data = zoneHistory[z].map(function (p) { return p.pm25; });
+          co2Chart.data.datasets[i].data = zoneHistory[z].map(function (p) { return p.co2; });
+        });
+        pm25Chart.update();
+        co2Chart.update();
+      }
+
+      // ============ MQTT 连接 ============
+      const client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000 });
+
+      client.on('connect', function () {
+        setConn('on');
+        client.subscribe(TOPIC, function (err) {
+          if (err) console.error('[AirGuard] 订阅失败:', err);
+        });
+      });
+      client.on('close', function () { setConn('off'); });
+      client.on('offline', function () { setConn('off'); });
+      client.on('reconnect', function () { setConn(''); });
+      client.on('error', function (err) {
+        console.error('[AirGuard] MQTT 错误:', err);
+        setConn('off', '连接错误，自动重连中…');
+      });
+      client.on('message', function (topic, message) {
+        try {
+          // TextDecoder 兼容 Buffer / Uint8Array 两种 payload 形态
+          const payload = JSON.parse(new TextDecoder().decode(message));
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            throw new Error('payload 不是对象');
+          }
+          onEnvMessage(topic, payload);
+        } catch (e) {
+          // 错误 JSON 报文不崩溃页面，仅控制台输出错误
+          console.error('[AirGuard] 消息解析失败:', e);
+        }
+      });
+
+      buildCharts();
+      renderAll(); // 初始渲染：所有模块显示等待状态
+    })();
+  </script>
+</body>
+</html>

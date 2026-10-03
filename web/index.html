@@ -3,16 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AirGuard · D1 Web 监测台</title>
+  <title>AirGuard 空气质量与人流监测综合系统 · Web 总视图</title>
   <!-- mqtt.js CDN（UMD 构建，暴露全局 mqtt） -->
   <script src="https://cdn.jsdelivr.net/npm/mqtt@5/dist/mqtt.min.js"></script>
   <style>
     :root {
-      --bg: #f3f5f9;
-      --card-bg: #ffffff;
+      --bg: #eef1f5;
+      --panel-bg: #ffffff;
       --text: #1f2937;
       --muted: #6b7280;
-      --wait: #9ca3af;
+      --border: #e5e7eb;
+      --nav-bg: #0f172a;
+      --wait-bg: #f5f5f5;
+      --wait-accent: #9ca3af;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -20,185 +23,478 @@
       color: var(--text);
       font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
       min-height: 100vh;
-      padding: 24px;
     }
-    header {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-bottom: 20px;
-    }
-    header h1 { font-size: 22px; }
-    #conn { font-size: 13px; color: var(--muted); }
-    #conn .dot {
-      display: inline-block;
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      margin-right: 6px;
-      background: var(--wait);
-    }
-    #conn.on .dot { background: #22c55e; }
-    #conn.off .dot { background: #ef4444; }
-    main {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 16px;
-    }
-    .card {
-      background: var(--card-bg);
-      border-radius: 12px;
-      border: 1px solid #e5e7eb;
-      border-left: 5px solid var(--wait);
-      padding: 16px;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, .05);
-    }
-    .card-head {
+
+    /* ===== 顶部全局导航栏 ===== */
+    .topbar {
+      background: var(--nav-bg);
+      color: #e5e7eb;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 12px;
-    }
-    .card-head h2 { font-size: 17px; }
-    .badge {
-      font-size: 13px;
-      color: #fff;
-      background: var(--wait);
-      padding: 3px 10px;
-      border-radius: 999px;
-    }
-    .metrics {
-      list-style: none;
-      display: grid;
-      grid-template-columns: 1fr 1fr;
+      flex-wrap: wrap;
       gap: 8px 16px;
+      padding: 12px 24px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
     }
-    .metrics li { font-size: 13px; color: var(--muted); }
+    .topbar h1 { font-size: 18px; color: #fff; letter-spacing: .5px; }
+    .topbar .sub { font-size: 12px; color: #94a3b8; margin-top: 2px; }
+    .top-meta { display: flex; align-items: center; gap: 16px; font-size: 13px; }
+    #online-zones b { color: #60a5fa; font-size: 15px; }
+    #conn { display: inline-flex; align-items: center; gap: 6px; color: #cbd5e1; }
+    #conn .dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--wait-accent);
+    }
+    #conn.on .dot { background: #22c55e; }
+    #conn.off .dot { background: #ef4444; }
+
+    /* ===== 主体布局：左上监测 + 右上3D预览，下方概览横跨 ===== */
+    .layout {
+      display: grid;
+      grid-template-columns: 3fr 2fr;
+      gap: 16px;
+      padding: 16px 24px 24px;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .04);
+    }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+      margin-bottom: 14px;
+    }
+    .panel-head h2 { font-size: 15px; }
+    .tag {
+      font-size: 11px;
+      color: #475569;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      padding: 1px 6px;
+      margin-left: 8px;
+      vertical-align: 2px;
+    }
+    .zone-id { font-size: 11px; color: var(--muted); font-family: Consolas, monospace; }
+
+    /* ===== D1 多区域监测卡片 ===== */
+    .monitor-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 12px;
+    }
+    .zone-card {
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--wait-accent);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--wait-bg);
+    }
+    .zone-card .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .zone-card .card-head h3 { font-size: 15px; }
+    .status-badge {
+      font-size: 12px;
+      color: #fff;
+      background: var(--wait-accent);
+      padding: 2px 9px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .metrics { list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
+    .metrics li { font-size: 12px; color: var(--muted); }
     .metrics b {
       display: block;
-      font-size: 18px;
+      font-size: 15px;
       color: var(--text);
       font-weight: 600;
     }
-    .time { margin-top: 12px; font-size: 12px; color: var(--muted); }
+    .metrics .time-cell {
+      grid-column: 1 / -1;
+      border-top: 1px dashed var(--border);
+      padding-top: 6px;
+      margin-top: 2px;
+    }
+    .zone-empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+
+    /* ===== E1 地图/3D 预览占位面板 ===== */
+    .map3d {
+      display: flex;
+      gap: 12px;
+      justify-content: space-around;
+      background: #f8fafc;
+      border: 1px dashed #cbd5e1;
+      border-radius: 8px;
+      padding: 18px 12px;
+      cursor: pointer;
+    }
+    .map-block { flex: 1; text-align: center; }
+    .map-block .cube {
+      height: 72px;
+      border-radius: 8px;
+      background: var(--wait-bg);
+      border: 1px solid var(--wait-accent);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      transition: background-color .25s;
+    }
+    .map-block .cube .b-name { font-size: 14px; font-weight: 600; color: var(--text); }
+    .map-block .cube .b-status { font-size: 12px; color: var(--text); }
+    .panel-hint { margin-top: 10px; font-size: 12px; color: var(--muted); text-align: center; }
+
+    /* ===== 下方：事件与系统概览面板（D2/D3 预留） ===== */
+    #panel-overview { grid-column: 1 / -1; }
+    .overview-grid { display: grid; grid-template-columns: 1fr 1fr 2fr; gap: 16px; }
+    .overview-grid h3 { font-size: 13px; color: var(--muted); margin-bottom: 8px; font-weight: 600; }
+    #zone-summary { list-style: none; display: grid; gap: 6px; font-size: 13px; }
+    #zone-summary li {
+      padding: 6px 8px;
+      border-radius: 6px;
+      border-left: 3px solid var(--wait-accent);
+      background: #f8fafc;
+    }
+    #priority-zone { min-height: 64px; }
+    .placeholder {
+      border: 1px dashed #cbd5e1;
+      border-radius: 8px;
+      color: #94a3b8;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      text-align: center;
+      min-height: inherit;
+    }
+    #event-list { list-style: none; font-size: 13px; max-height: 180px; overflow-y: auto; }
+    #event-list li { padding: 5px 8px; border-bottom: 1px dashed var(--border); }
+    #event-list li.empty { color: var(--muted); border: none; }
+    .ev-time { font-family: Consolas, monospace; color: var(--muted); margin-right: 8px; font-size: 12px; }
+    .ev-zone { font-weight: 600; }
+
+    @media (max-width: 960px) {
+      .layout { grid-template-columns: 1fr; }
+      #panel-overview { grid-column: auto; }
+      .overview-grid { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>AirGuard · D1 Web 监测台</h1>
-    <div id="conn"><span class="dot"></span><span id="conn-text">连接中…</span></div>
+  <!-- ===== 顶部全局导航栏 ===== -->
+  <header class="topbar">
+    <div>
+      <h1>AirGuard 空气质量与人流监测综合系统</h1>
+      <div class="sub">Web 总视图门户 · MQTT 实时数据流底座（任务书 C02 V0.9R2）</div>
+    </div>
+    <div class="top-meta">
+      <span id="online-zones">在线区域 <b>0</b>/3</span>
+      <span id="conn"><span class="dot"></span><span id="conn-text">连接中…</span></span>
+    </div>
   </header>
-  <main id="cards"></main>
 
-  <script type="module">
-    import { calcAirStatus } from './util.js';
+  <main class="layout">
+    <!-- ===== 左上：多区域实时监测模块（D1 监测台） ===== -->
+    <section class="panel" id="panel-monitor">
+      <div class="panel-head">
+        <h2>多区域实时监测<span class="tag">D1</span></h2>
+      </div>
+      <div id="monitor-cards" class="monitor-grid"></div>
+    </section>
 
-    // 全局对象：各区域数据分开存，互不串线
-    window.globalZones = {
-      'zone-n': null,
-      'zone-s': null,
-      'zone-w': null,
-    };
-    const ZONES = Object.keys(window.globalZones);
+    <!-- ===== 右上：地图/3D 模块预览占位面板（E1） ===== -->
+    <!-- 此处仅为总视图内的预览窗口；完整 three-min 3D 数字孪生页面后续单独生成 -->
+    <section class="panel" id="panel-3d">
+      <div class="panel-head">
+        <h2>校园空间视图（地图/3D 预览）<span class="tag">E1</span></h2>
+      </div>
+      <div id="map3d" class="map3d" title="独立 3D 页面待接入"></div>
+      <p class="panel-hint">点击跳转独立 3D 页面查看完整数字孪生场景（待接入）</p>
+    </section>
 
-    const MQTT_URL = 'ws://127.0.0.1:8083';
-    const TOPIC = 'airguard/+/env';
+    <!-- ===== 下方：事件与系统概览面板（D2/D3 预留） ===== -->
+    <section class="panel" id="panel-overview">
+      <div class="panel-head">
+        <h2>系统事件概览<span class="tag">D2 / D3</span></h2>
+      </div>
+      <div class="overview-grid">
+        <div>
+          <h3>区域最新状态摘要</h3>
+          <ul id="zone-summary"></ul>
+        </div>
+        <div>
+          <h3>优先关注区域</h3>
+          <!-- D2 预留容器：优先关注区域计算逻辑后续接入，结果渲染到此容器 -->
+          <div id="priority-zone" class="placeholder">待接入 D2 优先关注区域计算逻辑</div>
+        </div>
+        <div>
+          <h3>事件记录</h3>
+          <!-- D3 预留容器：事件状态机后续迭代，当前仅记录异常状态简易事件 -->
+          <ul id="event-list"></ul>
+        </div>
+      </div>
+    </section>
+  </main>
 
-    // status → 卡片左侧边框色（含徽章底色）
-    const STATUS_COLORS = {
-      '正常': '#22c55e',
-      '轻度污染': '#f59e0b',
-      '重度污染': '#ef4444',
-      '通风不足风险': '#9333ea',
-    };
-    const WAIT_COLOR = '#9ca3af';
+  <script>
+    (function () {
+      'use strict';
 
-    const $cards = document.getElementById('cards');
-    const $conn = document.getElementById('conn');
-    const $connText = document.getElementById('conn-text');
+      // ============ 配置 ============
+      const MQTT_URL = 'ws://127.0.0.1:8083/mqtt';
+      const TOPIC = 'airguard/+/env';
 
-    function setConn(state) {
-      $conn.className = state; // '' | 'on' | 'off'
-      $connText.textContent =
-        state === 'on' ? '已连接 ws://127.0.0.1:8083' :
-        state === 'off' ? '连接断开，自动重连中…' : '连接中…';
-    }
-
-    // 优先取 payload.zoneId；缺失时退回 topic 中间段（airguard/<zone>/env）；都不认识则丢弃
-    function resolveZone(topic, payload) {
-      const z = (payload && payload.zoneId) || topic.split('/')[1] || '';
-      return Object.prototype.hasOwnProperty.call(window.globalZones, z) ? z : null;
-    }
-
-    function onEnvMessage(topic, payload) {
-      const zone = resolveZone(topic, payload);
-      if (!zone) {
-        console.warn('[AirGuard] 未知区域消息，已忽略:', topic);
-        return;
-      }
-      // 只更新对应 zone 的条目，绝不写入其他区域
-      window.globalZones[zone] = {
-        zoneId: payload.zoneId,
-        pm25: payload.pm25,
-        co2: payload.co2,
-        crowdLevel: payload.crowdLevel,
-        time: payload.time,
-        status: calcAirStatus(payload.pm25, payload.co2),
-        updatedAt: new Date(),
+      // 区域配置：zoneId → 中文名
+      const ZONES = {
+        'zone-n': { name: '宿舍区' },
+        'zone-s': { name: '教学区' },
+        'zone-w': { name: '食堂区' },
       };
-      renderUI();
-    }
+      const ZONE_IDS = Object.keys(ZONES);
 
-    function renderUI() {
-      const fmt = (x) => (x === undefined || x === null || x === '' ? '--' : x);
-      $cards.innerHTML = ZONES.map((zone) => {
-        const d = window.globalZones[zone];
-        const color = d ? (STATUS_COLORS[d.status] || WAIT_COLOR) : WAIT_COLOR;
-        const badge = d ? d.status : '等待数据';
-        const localTime = d
-          ? d.updatedAt.toLocaleTimeString('zh-CN', { hour12: false })
-          : '暂无消息';
-        return `
-          <section class="card" style="border-left-color:${color}">
-            <div class="card-head">
-              <h2>${zone}</h2>
-              <span class="badge" style="background:${color}">${badge}</span>
-            </div>
-            <ul class="metrics">
-              <li>PM2.5<b>${fmt(d && d.pm25)}</b>μg/m³</li>
-              <li>CO₂<b>${fmt(d && d.co2)}</b>ppm</li>
-              <li>人流等级<b>${fmt(d && d.crowdLevel)}</b></li>
-              <li>上报时间<b>${fmt(d && d.time)}</b></li>
-            </ul>
-            <p class="time">本地更新于 ${localTime}</p>
-          </section>`;
-      }).join('');
-    }
+      // zoneState：三个区域状态独立存储，只允许按 zone 键更新，严禁串数据
+      // 条目结构：{ zoneId, pm25, co2, crowdLevel, time, status, receivedAt }
+      const zoneState = ZONE_IDS.reduce(function (acc, z) { acc[z] = null; return acc; }, {});
 
-    // MQTT 连接
-    const client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000 });
+      // status → 卡片背景色（任务书规定）；强调色用于徽章 / 色块边框
+      const STATUS_BG = {
+        '正常': '#e8f5e9',
+        '轻度污染': '#fff8e1',
+        '重度污染': '#ffebee',
+        '通风不足风险': '#f3e5f5',
+      };
+      const STATUS_ACCENT = {
+        '正常': '#2e7d32',
+        '轻度污染': '#f57f17',
+        '重度污染': '#c62828',
+        '通风不足风险': '#7b1fa2',
+      };
+      const WAIT_BG = '#f5f5f5';
+      const WAIT_ACCENT = '#9ca3af';
 
-    client.on('connect', () => {
-      setConn('on');
-      client.subscribe(TOPIC, (err) => {
-        if (err) console.error('[AirGuard] 订阅失败:', err);
-      });
-    });
-    client.on('close', () => setConn('off'));
-    client.on('offline', () => setConn('off'));
-    client.on('reconnect', () => setConn(''));
-    client.on('error', (err) => console.error('[AirGuard] MQTT 错误:', err));
-    client.on('message', (topic, message) => {
-      try {
-        // TextDecoder 兼容 Buffer / Uint8Array 两种 payload 形态
-        onEnvMessage(topic, JSON.parse(new TextDecoder().decode(message)));
-      } catch (e) {
-        console.error('[AirGuard] 消息解析失败:', e);
+      // crowdLevel → 中文文案（仅展示，不参与 status 计算）
+      const CROWD_LEVELS = { 0: '稀疏', 1: '正常', 2: '拥挤', 3: '严重拥挤' };
+
+      // 简易事件记录（D3 状态机后续迭代，当前仅记录异常状态变化）
+      const eventLog = [];
+      const EVENT_LOG_MAX = 100;
+
+      // ============ DOM ============
+      const $conn = document.getElementById('conn');
+      const $connText = document.getElementById('conn-text');
+      const $onlineZones = document.getElementById('online-zones');
+      const $monitorCards = document.getElementById('monitor-cards');
+      const $map3d = document.getElementById('map3d');
+      const $zoneSummary = document.getElementById('zone-summary');
+      const $eventList = document.getElementById('event-list');
+
+      // ============ status 计算（任务书：按顺序判定，仅用 pm25 / co2） ============
+      function calcStatus(pm25, co2) {
+        if (pm25 > 150) return '重度污染';
+        if (pm25 > 75) return '轻度污染';
+        if (co2 >= 1500) return '通风不足风险';
+        return '正常';
       }
-    });
 
-    renderUI(); // 初始渲染：三张卡片均为「等待数据」、灰色左边框
+      function crowdText(crowdLevel) {
+        if (crowdLevel === undefined || crowdLevel === null || crowdLevel === '') return '--';
+        const v = Number(crowdLevel);
+        return Object.prototype.hasOwnProperty.call(CROWD_LEVELS, v) ? CROWD_LEVELS[v] : crowdLevel;
+      }
+
+      const fmt = function (x) { return (x === undefined || x === null || x === '' ? '--' : x); };
+
+      // ============ 顶部连接状态指示器 ============
+      function setConn(state, text) {
+        $conn.className = state; // '' | 'on' | 'off'
+        $connText.textContent = text || (
+          state === 'on' ? '已连接 ' + MQTT_URL :
+          state === 'off' ? '连接断开，自动重连中…' : '连接中…'
+        );
+      }
+
+      // ============ 区域解析 ============
+      // 数据契约字段为 zoneId；兼容旧版小写 zoneid；都缺失时退回 topic 中间段
+      // （airguard/<zone>/env）；三者都不认识则丢弃该消息
+      function resolveZone(topic, payload) {
+        const z = (payload && (payload.zoneId || payload.zoneid)) || topic.split('/')[1] || '';
+        return Object.prototype.hasOwnProperty.call(ZONES, z) ? z : null;
+      }
+
+      // ============ 消息处理 ============
+      function onEnvMessage(topic, payload) {
+        const zone = resolveZone(topic, payload);
+        if (!zone) {
+          console.warn('[AirGuard] 未知区域消息，已忽略:', topic);
+          return;
+        }
+        const prev = zoneState[zone];
+        const status = calcStatus(payload.pm25, payload.co2);
+        // 只更新对应 zone 的条目，绝不写入其他区域
+        zoneState[zone] = {
+          zoneId: zone,
+          pm25: payload.pm25,
+          co2: payload.co2,
+          crowdLevel: payload.crowdLevel,
+          time: payload.time,
+          status: status,
+          receivedAt: new Date(),
+        };
+        // 简易事件记录：仅当状态变为异常（非“正常”）时追加一条，避免重复消息刷屏
+        if (status !== '正常' && (!prev || prev.status !== status)) {
+          eventLog.push({
+            zone: zone, status: status,
+            pm25: payload.pm25, co2: payload.co2,
+            at: new Date(),
+          });
+          if (eventLog.length > EVENT_LOG_MAX) {
+            eventLog.splice(0, eventLog.length - EVENT_LOG_MAX);
+          }
+        }
+        renderAll();
+      }
+
+      // ============ 渲染：所有模块同源，只读 zoneState ============
+      function renderAll() {
+        renderTopbar();
+        renderMonitor();
+        renderMap3D();
+        renderOverview();
+      }
+
+      function renderTopbar() {
+        const online = ZONE_IDS.filter(function (z) { return zoneState[z]; }).length;
+        $onlineZones.innerHTML = '在线区域 <b>' + online + '</b>/' + ZONE_IDS.length;
+      }
+
+      // D1 监测卡片
+      function renderMonitor() {
+        $monitorCards.innerHTML = ZONE_IDS.map(function (zone) {
+          const d = zoneState[zone];
+          if (!d) {
+            return '<section class="zone-card">' +
+              '<div class="card-head"><h3>' + ZONES[zone].name +
+              ' <span class="zone-id">' + zone + '</span></h3></div>' +
+              '<p class="zone-empty">暂无实时数据</p>' +
+              '</section>';
+          }
+          const bg = STATUS_BG[d.status] || WAIT_BG;
+          const accent = STATUS_ACCENT[d.status] || WAIT_ACCENT;
+          return '<section class="zone-card" style="background:' + bg + ';border-left-color:' + accent + '">' +
+            '<div class="card-head"><h3>' + ZONES[zone].name +
+            ' <span class="zone-id">' + zone + '</span></h3>' +
+            '<span class="status-badge" style="background:' + accent + '">' + d.status + '</span></div>' +
+            '<ul class="metrics">' +
+            '<li>PM2.5<b>' + fmt(d.pm25) + '</b>μg/m³</li>' +
+            '<li>CO₂<b>' + fmt(d.co2) + '</b>ppm</li>' +
+            '<li>人流等级<b>' + crowdText(d.crowdLevel) + '</b></li>' +
+            '<li>状态<b>' + d.status + '</b></li>' +
+            '<li class="time-cell">上报时间<b>' + fmt(d.time) + '</b></li>' +
+            '</ul>' +
+            '</section>';
+        }).join('');
+      }
+
+      // E1 地图/3D 预览色块：方块颜色跟随对应区域 status 实时变色
+      function renderMap3D() {
+        $map3d.innerHTML = ZONE_IDS.map(function (zone) {
+          const d = zoneState[zone];
+          const bg = d ? (STATUS_BG[d.status] || WAIT_BG) : WAIT_BG;
+          const accent = d ? (STATUS_ACCENT[d.status] || WAIT_ACCENT) : WAIT_ACCENT;
+          return '<div class="map-block">' +
+            '<div class="cube" style="background:' + bg + ';border-color:' + accent + '">' +
+            '<span class="b-name">' + ZONES[zone].name + '</span>' +
+            '<span class="b-status">' + (d ? d.status : '暂无数据') + '</span>' +
+            '</div>' +
+            '<div class="zone-id">' + zone + '</div>' +
+            '</div>';
+        }).join('');
+      }
+
+      // 概览面板：区域最新状态摘要 + 简易事件列表
+      function renderOverview() {
+        $zoneSummary.innerHTML = ZONE_IDS.map(function (zone) {
+          const d = zoneState[zone];
+          if (!d) {
+            return '<li style="border-left-color:' + WAIT_ACCENT + '">' +
+              ZONES[zone].name + '（' + zone + '）：暂无数据</li>';
+          }
+          const accent = STATUS_ACCENT[d.status] || WAIT_ACCENT;
+          const t = d.receivedAt.toLocaleTimeString('zh-CN', { hour12: false });
+          return '<li style="border-left-color:' + accent + '">' +
+            ZONES[zone].name + '（' + zone + '）：<b>' + d.status + '</b>' +
+            '<span class="zone-id">　更新于 ' + t + '</span></li>';
+        }).join('');
+
+        if (eventLog.length === 0) {
+          $eventList.innerHTML = '<li class="empty">暂无异常事件</li>';
+          return;
+        }
+        $eventList.innerHTML = eventLog.slice().reverse().map(function (ev) {
+          const t = ev.at.toLocaleTimeString('zh-CN', { hour12: false });
+          return '<li><span class="ev-time">' + t + '</span>' +
+            '<span class="ev-zone">' + ZONES[ev.zone].name + '（' + ev.zone + '）</span> → ' +
+            ev.status + '（PM2.5 ' + fmt(ev.pm25) + ' · CO₂ ' + fmt(ev.co2) + '）</li>';
+        }).join('');
+      }
+
+      // TODO(D2): 优先关注区域计算逻辑后续在此接入，结果渲染到 #priority-zone 容器
+      // TODO(D3): 事件状态机后续在此扩展（事件分级、去重、生命周期管理等）
+      // TODO(E1): 完整 3D 页面（three-min 数字孪生）后续单独生成，此处仅总视图预览
+
+      // E1 预览面板点击：独立 3D 页面待接入
+      $map3d.addEventListener('click', function () {
+        console.info('[AirGuard] 独立 3D 页面待接入（three-min 完整数字孪生场景）');
+      });
+
+      // ============ MQTT 连接 ============
+      const client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000 });
+
+      client.on('connect', function () {
+        setConn('on');
+        client.subscribe(TOPIC, function (err) {
+          if (err) console.error('[AirGuard] 订阅失败:', err);
+        });
+      });
+      client.on('close', function () { setConn('off'); });
+      client.on('offline', function () { setConn('off'); });
+      client.on('reconnect', function () { setConn(''); });
+      client.on('error', function (err) {
+        console.error('[AirGuard] MQTT 错误:', err);
+        setConn('off', '连接错误，自动重连中…');
+      });
+      client.on('message', function (topic, message) {
+        try {
+          // TextDecoder 兼容 Buffer / Uint8Array 两种 payload 形态
+          const payload = JSON.parse(new TextDecoder().decode(message));
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            throw new Error('payload 不是对象');
+          }
+          onEnvMessage(topic, payload);
+        } catch (e) {
+          // 错误 JSON 报文不崩溃页面，仅控制台输出错误
+          console.error('[AirGuard] 消息解析失败:', e);
+        }
+      });
+
+      renderAll(); // 初始渲染：所有模块显示等待状态
+    })();
   </script>
 </body>
 </html>
