@@ -307,7 +307,8 @@
 
       const d3Events = {};        // zone → 活跃事件（OPEN / HANDLING）；RECOVERED 后置 null
       const d3History = [];       // 已恢复事件历史（RECOVERED）
-      const zoneLastMsgTime = {}; // zone → 最近报文 time（重复/乱序判断）
+      const zoneLastMsgTime = {}; // zone → 最近报文 time（乱序判断）
+      const zoneLastMsgKey = {};  // zone → 最近报文去重键（重复判断）
 
       // ============ DOM ============
       const $conn = document.getElementById('conn');
@@ -1212,6 +1213,15 @@
         }).join('');
       }
 
+      // 消息去重键：优先 message id（payload.msgId）；
+      // 无 msgId 时使用 zoneId + time + 关键荷载（event_id 仅标识事件，不参与去重）
+      function msgDedupKey(zone, payload) {
+        if (payload.msgId !== undefined && payload.msgId !== null && payload.msgId !== '') {
+          return zone + '|msgId:' + payload.msgId;
+        }
+        return zone + '|' + payload.time + '|' + [payload.pm25, payload.co2, payload.crowdLevel].join(',');
+      }
+
       // ============ 消息处理 ============
       function onEnvMessage(topic, payload) {
         const zone = resolveZone(topic, payload);
@@ -1219,11 +1229,14 @@
           console.warn('[AirGuard] 未知区域消息，已忽略:', topic);
           return;
         }
-        // ===== 消息健壮性：zoneId+time 去重；乱序旧消息不覆盖新状态（迟到仅补充历史） =====
+        // ===== 消息健壮性 =====
+        // 重复：同一消息只生效一次（msgId 优先，否则 zoneId+time+关键荷载）
+        // 乱序：time 不递增的旧消息不得覆盖新状态；迟到：不回滚 RECOVERED，仅补充历史记录
         const msgTime = payload.time;
         const lastTime = zoneLastMsgTime[zone];
+        const dedupKey = msgDedupKey(zone, payload);
         if (msgTime && lastTime) {
-          if (msgTime === lastTime) {
+          if (dedupKey === zoneLastMsgKey[zone]) {
             console.log('[AirGuard] 重复消息已忽略:', zone, msgTime);
             d3AppendLateNote(zone, payload, '重复报文');
             return;
@@ -1234,6 +1247,7 @@
             return;
           }
         }
+        zoneLastMsgKey[zone] = dedupKey;
         zoneLastMsgTime[zone] = msgTime || lastTime;
 
         const status = calcStatus(payload.pm25, payload.co2);
