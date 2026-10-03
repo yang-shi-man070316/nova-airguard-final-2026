@@ -1,65 +1,168 @@
-/* AirGuard 环境监测 · 首页样式：浅色卡片布局 */
+/* AirGuard 环境监测 · 首页样式：浅色卡片 + 状态色彩 */
 
 .container {
-  padding: 24rpx;
+  padding: 24rpx 24rpx 40rpx;
 }
 
-/* ===== MQTT 连接状态栏 ===== */
-.status-bar {
+/* ===== 顶部状态区（渐变横幅） ===== */
+.hero {
+  background: linear-gradient(135deg, #1e3a5f, #2c5f8a);
+  border-radius: 20rpx;
+  padding: 32rpx 30rpx 26rpx;
+  margin-bottom: 24rpx;
+  box-shadow: 0 4rpx 16rpx rgba(30, 58, 95, 0.25);
+}
+.hero-title-row {
   display: flex;
   align-items: center;
   gap: 14rpx;
-  background: #ffffff;
-  padding: 20rpx 24rpx;
-  border-radius: 16rpx;
-  margin-bottom: 24rpx;
-  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.03);
+  margin-bottom: 8rpx;
+}
+.hero-logo { font-size: 46rpx; }
+.hero-title {
+  font-size: 44rpx;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: 2rpx;
+  text-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.3);
+}
+.hero-desc {
+  font-size: 24rpx;
+  color: #bfd9f2;
+  margin-bottom: 20rpx;
+}
+.hero-divider {
+  height: 1rpx;
+  background: rgba(255, 255, 255, 0.18);
+  margin-bottom: 18rpx;
+}
+.hero-row {
+  display: flex;
+  align-items: center;
+  gap: 14rpx;
 }
 .status-dot {
   width: 18rpx;
   height: 18rpx;
   border-radius: 50%;
-  background: #9ca3af;
+  background: #94a3b8;
 }
 .status-dot.ok { background: #22c55e; }
 .status-dot.err { background: #ef4444; }
-.status-text { font-size: 26rpx; color: #4b5563; }
+.hero-status {
+  color: #ffffff;
+  font-size: 28rpx;
+  font-weight: 600;
+}
+.hero-online {
+  margin-left: auto;
+  color: #bfd9f2;
+  font-size: 24rpx;
+}
+.hero-sub {
+  margin-top: 10rpx;
+  color: #93aec9;
+  font-size: 22rpx;
+}
+
+/* ===== 感知结论卡片（背景色随结论等级变化） ===== */
+.conclusion {
+  border-radius: 20rpx;
+  padding: 24rpx 28rpx;
+  margin-bottom: 24rpx;
+  border-left: 8rpx solid #9ca3af;
+  background: #f3f4f6;
+  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.03);
+}
+.conclusion.wait { border-left-color: #9ca3af; background: #f3f4f6; }
+.conclusion.green { border-left-color: #22c55e; background: #eefaf0; }
+.conclusion.orange { border-left-color: #f59e0b; background: #fff8e6; }
+.conclusion.red { border-left-color: #ef4444; background: #fff1f0; }
+.conclusion-head {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+  margin-bottom: 12rpx;
+}
+.conclusion-icon { font-size: 30rpx; }
+.conclusion-title { font-size: 28rpx; font-weight: 600; color: #1f2937; }
+.conclusion-text {
+  font-size: 26rpx;
+  line-height: 1.6;
+  color: #374151;
+}
 
 /* ===== 区域卡片 ===== */
+.section-title {
+  font-size: 26rpx;
+  color: #6b7280;
+  margin: 8rpx 0 16rpx;
+  font-weight: 600;
+}
 .card {
   background: #ffffff;
-  border-radius: 16rpx;
-  padding: 24rpx;
+  border-radius: 20rpx;
+  border-left: 8rpx solid #9ca3af;
+  padding: 24rpx 28rpx;
   margin-bottom: 24rpx;
-  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.03);
+  box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.04);
 }
 .card-head {
   display: flex;
   align-items: center;
   gap: 10rpx;
-  margin-bottom: 16rpx;
+  margin-bottom: 18rpx;
 }
 .card-title { font-size: 32rpx; font-weight: 600; }
-.zone-id { font-size: 22rpx; color: #9ca3af; font-family: monospace; }
+.zone-id {
+  font-size: 22rpx;
+  color: #9ca3af;
+  font-family: monospace;
+  background: #f3f4f6;
+  padding: 2rpx 12rpx;
+  border-radius: 8rpx;
+}
 .tag {
   margin-left: auto;
   color: #ffffff;
-  padding: 4rpx 20rpx;
+  padding: 6rpx 22rpx;
   border-radius: 999rpx;
   font-size: 24rpx;
+  font-weight: 600;
 }
-.tag.green { background: #22c55e; }
-.tag.orange { background: #f59e0b; }
-.tag.red { background: #ef4444; }
-.tag.gray { background: #9ca3af; }
 
-.row {
+/* 指标 2×2 网格 */
+.metrics {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10rpx 0;
-  border-bottom: 1rpx dashed #eef0f3;
+  flex-wrap: wrap;
+  gap: 14rpx;
 }
-.row:last-child { border-bottom: none; }
-.label { font-size: 26rpx; color: #6b7280; }
-.value { font-size: 28rpx; color: #1f2937; font-weight: 600; }
+.metric {
+  width: calc(50% - 7rpx);
+  background: #f8fafc;
+  border-radius: 12rpx;
+  padding: 16rpx 20rpx;
+  box-sizing: border-box;
+}
+.metric.wide { width: 100%; }
+.m-label {
+  display: block;
+  font-size: 22rpx;
+  color: #6b7280;
+  margin-bottom: 6rpx;
+}
+.m-value {
+  font-size: 30rpx;
+  font-weight: 700;
+  color: #1f2937;
+}
+.m-unit { font-size: 20rpx; font-weight: 400; color: #9ca3af; }
+.m-time { font-size: 24rpx; font-weight: 500; }
+
+/* ===== 底部提示 ===== */
+.footer {
+  text-align: center;
+  font-size: 22rpx;
+  color: #b0b8c4;
+  padding-top: 8rpx;
+}

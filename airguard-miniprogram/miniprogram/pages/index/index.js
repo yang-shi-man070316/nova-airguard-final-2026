@@ -7,6 +7,14 @@
 const MQTT_URL = 'ws://127.0.0.1:8083/mqtt'; // 本地联调地址；真机请改为局域网 IP 或 wss
 const TOPIC_SUB = 'airguard/+/env';
 
+// 状态 → 强调色（标签底色 / 卡片左边框）
+const ACCENT_COLORS = {
+  green: '#22c55e',
+  orange: '#f59e0b',
+  red: '#ef4444',
+  gray: '#9ca3af',
+};
+
 // ---------- 字节工具 ----------
 
 // 变长剩余长度编码（MQTT 规范）
@@ -240,10 +248,15 @@ Page({
   data: {
     connText: '未连接',
     connClass: '', // '' | 'ok' | 'err'
+    topicText: TOPIC_SUB,
+    onlineText: '在线区域 0/3',
+    conclusionText: '等待采集数据，暂无现场感知结论',
+    conclusionClass: 'wait',
+    conclusionIcon: '⏳',
     zoneList: [
-      { zoneid: 'zone-n', zoneName: '宿舍N', pm25: '--', co2: '--', crowdText: '--', time: '--', statusText: '等待数据', tagClass: 'gray' },
-      { zoneid: 'zone-s', zoneName: '宿舍S', pm25: '--', co2: '--', crowdText: '--', time: '--', statusText: '等待数据', tagClass: 'gray' },
-      { zoneid: 'zone-w', zoneName: '宿舍W', pm25: '--', co2: '--', crowdText: '--', time: '--', statusText: '等待数据', tagClass: 'gray' },
+      { zoneid: 'zone-n', zoneName: '宿舍区', pm25: '--', co2: '--', crowdLevel: null, crowdText: '--', time: '--', statusText: '等待数据', accentColor: ACCENT_COLORS.gray },
+      { zoneid: 'zone-s', zoneName: '教学区', pm25: '--', co2: '--', crowdLevel: null, crowdText: '--', time: '--', statusText: '等待数据', accentColor: ACCENT_COLORS.gray },
+      { zoneid: 'zone-w', zoneName: '食堂区', pm25: '--', co2: '--', crowdLevel: null, crowdText: '--', time: '--', statusText: '等待数据', accentColor: ACCENT_COLORS.gray },
     ],
   },
 
@@ -310,15 +323,17 @@ Page({
         return Object.assign({}, item, {
           pm25: msg.pm25,
           co2: msg.co2,
+          crowdLevel: crowdLevel,
           crowdText: crowdText,
           time: msg.time,
           statusText: statusText,
-          tagClass: tagClass,
+          accentColor: ACCENT_COLORS[tagClass],
         });
       }
       return item;
     });
     this.setData({ zoneList: zoneList });
+    this.updateStats();
 
     // 告警：重度污染或人流严重拥挤时弹出 wx.showModal（同一状态去重）
     const alertKey = statusText + '|' + crowdLevel;
@@ -330,5 +345,49 @@ Page({
         showCancel: false,
       });
     }
+  },
+
+  // 汇总三区域最新状态：在线区域计数 + 一句话感知结论
+  updateStats: function () {
+    const list = this.data.zoneList;
+    const online = list.filter(function (i) { return i.statusText !== '等待数据'; });
+
+    let conclusionText = '等待采集数据，暂无现场感知结论';
+    let conclusionClass = 'wait';
+    let conclusionIcon = '⏳';
+
+    if (online.length > 0) {
+      const names = function (arr) {
+        return arr.map(function (i) { return i.zoneName; }).join('、');
+      };
+      const heavy = list.filter(function (i) { return i.statusText === '重度污染'; });
+      const light = list.filter(function (i) { return i.statusText === '轻度污染'; });
+      const crowd3 = list.filter(function (i) { return i.crowdLevel === 3; });
+      const crowd2 = list.filter(function (i) { return i.crowdLevel === 2; });
+
+      if (heavy.length) {
+        conclusionText = '当前' + names(heavy) + '出现重度污染，建议减少户外活动并开启空气净化。';
+        conclusionClass = 'red'; conclusionIcon = '🚨';
+      } else if (light.length) {
+        conclusionText = names(light) + '轻度污染，敏感人群建议减少长时间停留。';
+        conclusionClass = 'orange'; conclusionIcon = '⚠️';
+      } else if (crowd3.length) {
+        conclusionText = names(crowd3) + '人流严重拥挤，建议错峰前往。';
+        conclusionClass = 'red'; conclusionIcon = '🚨';
+      } else if (crowd2.length) {
+        conclusionText = names(crowd2) + '人流拥挤，注意保持间距。';
+        conclusionClass = 'orange'; conclusionIcon = '⚠️';
+      } else {
+        conclusionText = '校园空气质量整体良好，各区域状态正常。';
+        conclusionClass = 'green'; conclusionIcon = '✅';
+      }
+    }
+
+    this.setData({
+      onlineText: '在线区域 ' + online.length + '/3',
+      conclusionText: conclusionText,
+      conclusionClass: conclusionClass,
+      conclusionIcon: conclusionIcon,
+    });
   },
 });

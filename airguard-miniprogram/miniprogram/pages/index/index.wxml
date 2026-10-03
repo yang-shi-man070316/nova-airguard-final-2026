@@ -1,33 +1,59 @@
 <!-- AirGuard 环境监测 · 首页 -->
 <view class="container">
-  <!-- MQTT 连接状态栏 -->
-  <view class="status-bar">
-    <view class="status-dot {{connClass}}"></view>
-    <text class="status-text">MQTT：{{connText}}</text>
+  <!-- 顶部标题横幅（渐变） -->
+  <view class="hero">
+    <view class="hero-title-row">
+      <text class="hero-logo">🛡️</text>
+      <text class="hero-title">AirGuard 环境监测</text>
+    </view>
+    <view class="hero-desc">空气质量 · 人流密度 · 实时监测</view>
+    <view class="hero-divider"></view>
+    <view class="hero-row">
+      <view class="status-dot {{connClass}}"></view>
+      <text class="hero-status">{{connText}}</text>
+      <text class="hero-online">{{onlineText}}</text>
+    </view>
+    <view class="hero-sub">MQTT 实时数据流 · {{topicText}}</view>
   </view>
 
+  <!-- 现场感知结论（自动汇总三区域最新状态，一句话结论） -->
+  <view class="conclusion {{conclusionClass}}">
+    <view class="conclusion-head">
+      <text class="conclusion-icon">{{conclusionIcon}}</text>
+      <text class="conclusion-title">现场感知结论</text>
+    </view>
+    <text class="conclusion-text">{{conclusionText}}</text>
+  </view>
+
+  <view class="section-title">区域实时状态</view>
+
   <!-- 三个区域卡片 -->
-  <view class="card" wx:for="{{zoneList}}" wx:key="zoneid">
+  <view class="card" wx:for="{{zoneList}}" wx:key="zoneid" style="border-left-color: {{item.accentColor}};">
     <view class="card-head">
       <text class="card-title">{{item.zoneName}}</text>
       <text class="zone-id">{{item.zoneid}}</text>
-      <text class="tag {{item.tagClass}}">{{item.statusText}}</text>
+      <text class="tag" style="background: {{item.accentColor}};">{{item.statusText}}</text>
     </view>
-    <view class="row">
-      <text class="label">PM2.5</text>
-      <text class="value">{{item.pm25}} μg/m³</text>
-    </view>
-    <view class="row">
-      <text class="label">CO₂</text>
-      <text class="value">{{item.co2}} ppm</text>
-    </view>
-    <view class="row">
-      <text class="label">人流密度</text>
-      <text class="value">{{item.crowdText}}</text>
-    </view>
-    <view class="row">
-      <text class="label">更新时间</text>
-      <text class="value">{{item.time}}</text>
+    <view class="metrics">
+      <view class="metric">
+        <text class="m-label">PM2.5</text>
+        <text class="m-value">{{item.pm25}}<text class="m-unit"> μg/m³</text></text>
+      </view>
+      <view class="metric">
+        <text class="m-label">CO₂</text>
+        <text class="m-value">{{item.co2}}<text class="m-unit"> ppm</text></text>
+      </view>
+      <view class="metric">
+        <text class="m-label">人流密度</text>
+        <text class="m-value">{{item.crowdText}}</text>
+      </view>
+      <view class="metric wide">
+        <text class="m-label">更新时间</text>
+        <text class="m-value m-time">{{item.time}}</text>
+      </view>
     </view>
   </view>
+
+  <!-- 底部数据来源提示 -->
+  <view class="footer">数据来源：MQTT · {{topicText}}</view>
 </view>
