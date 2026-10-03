@@ -26,6 +26,20 @@ python airguard_offline_analyze.py sample_airguard.csv
 start report/report.html
 ```
 
+## 增量合并（从总视图导出 CSV 持续追加）
+
+1. 在 web/index.html 的 D1 面板点「开始记录」→ 页面持续采集各区域报文 →「导出 CSV」下载 `airguard_records_xxx.csv`
+2. 把下载的 CSV 放进 `report/` 目录（或任意位置）
+3. 运行：
+
+```bash
+python airguard_offline_analyze.py report/airguard_records_xxx.csv
+```
+
+脚本会自动：读取累计数据集 `report/history_merged.csv`（原有数据不变）→ 合并本次新 CSV → 按 zoneId+time 去重 → 重新生成 `report/report.html`。报告头部的「历史累计 / 本次新增 / 合并去重 / 累计有效」统计可看到增量效果。
+
+> 想从头开始累计：删除 `report/history_merged.csv` 后重新运行即可。
+
 ## 更换全新 CSV 重新生成
 
 准备一份符合统一字段的 CSV（列名：`zoneId,pm25,co2,crowdLevel,status,time`，zoneId 取值 zone-n / zone-s / zone-w，time 格式 `yyyy-MM-dd HH:mm:ss`），然后：

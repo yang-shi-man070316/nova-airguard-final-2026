@@ -25,6 +25,24 @@
       min-height: 100vh;
     }
 
+    .rec-controls { display: flex; align-items: center; gap: 10px; font-size: 12px; flex-wrap: wrap; }
+    .rec-status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+    .rec-dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; }
+    .rec-dot.on { background: #ef4444; }
+    .rec-count { color: #1f2937; font-weight: 600; }
+    .rec-btn {
+      font-size: 12px;
+      padding: 4px 12px;
+      border: 1px solid #2563eb;
+      color: #2563eb;
+      background: #fff;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .rec-btn:hover { background: #2563eb; color: #fff; }
+    .rec-btn:disabled { opacity: .45; cursor: not-allowed; }
+    .rec-btn:disabled:hover { background: #fff; color: #2563eb; }
+
     /* ===== 顶部全局导航栏 ===== */
     .topbar {
       background: var(--nav-bg);
@@ -321,6 +339,13 @@
     <section class="panel" id="panel-monitor">
       <div class="panel-head">
         <h2>多区域实时监测<span class="tag">D1</span></h2>
+        <!-- 数据链A：区域采集记录 + CSV 导出（导出文件可导入离线分析生成 report.html） -->
+        <div class="rec-controls">
+          <span class="rec-status"><span class="rec-dot" id="rec-dot"></span><span id="rec-text">未开始记录</span></span>
+          <span id="rec-count" class="rec-count">0 条</span>
+          <button id="btn-rec-toggle" class="rec-btn" type="button">开始记录</button>
+          <button id="btn-rec-export" class="rec-btn" type="button" disabled>导出 CSV</button>
+        </div>
       </div>
       <div id="monitor-cards" class="monitor-grid"></div>
     </section>
@@ -511,6 +536,11 @@
       const $d4Broker = document.getElementById('d4-broker');
       const $d4Tbody = document.getElementById('d4-tbody');
       const $d4Log = document.getElementById('d4-log');
+      const $recDot = document.getElementById('rec-dot');
+      const $recText = document.getElementById('rec-text');
+      const $recCount = document.getElementById('rec-count');
+      const $btnRecToggle = document.getElementById('btn-rec-toggle');
+      const $btnRecExport = document.getElementById('btn-rec-export');
 
       // ============ status 计算（任务书：按顺序判定，仅用 pm25 / co2） ============
       function calcStatus(pm25, co2) {
@@ -639,6 +669,20 @@
 
         // D3：驱动状态机（数据触发；OPEN→HANDLING 仅由按钮人工触发）
         d3HandleMessage(zone, payload, status);
+
+        // 数据链A：记录会话开启时，每条有效报文追加一行采集记录
+        if (recActive) {
+          recSession.push({
+            zoneId: zone,
+            pm25: payload.pm25,
+            co2: payload.co2,
+            crowdLevel: payload.crowdLevel,
+            status: status,
+            time: payload.time || new Date().toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-'),
+          });
+          $recCount.textContent = recSession.length + ' 条';
+          $btnRecExport.disabled = false;
+        }
 
         // 简易事件记录：仅当状态变为异常（非“正常”）时追加一条，避免重复消息刷屏
         if (status !== '正常' && (!prev || prev.status !== status)) {
@@ -1002,6 +1046,41 @@
         }
       }
 
+      // ============ 数据链A：区域采集记录与 CSV 导出 ============
+      // 导出字段与离线分析链统一：zoneId,pm25,co2,crowdLevel,status,time（status 由本页统一判级规则计算）
+      const recSession = []; // 本次记录会话的行集合
+      let recActive = false;
+
+      function recToggle() {
+        recActive = !recActive;
+        $recDot.className = 'rec-dot' + (recActive ? ' on' : '');
+        $recText.textContent = recActive
+          ? '记录中（开始于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '）'
+          : '未开始记录';
+        $btnRecToggle.textContent = recActive ? '停止记录' : '开始记录';
+        if (!recActive && recSession.length === 0) $btnRecExport.disabled = true;
+      }
+
+      function recExportCsv() {
+        if (recSession.length === 0) return;
+        // ﻿ BOM 前缀：保证 Excel 打开中文不乱码
+        const header = 'zoneId,pm25,co2,crowdLevel,status,time';
+        const lines = recSession.map(function (r) {
+          return [r.zoneId, r.pm25, r.co2, r.crowdLevel, r.status, r.time].join(',');
+        });
+        const csv = '﻿' + header + '\n' + lines.join('\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const ts = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '');
+        a.href = url;
+        a.download = 'airguard_records_' + ts + '.csv';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
       // ============ D4：链路状态面板 / 定时在线判定 / 手动重连 ============
       function renderD4() {
         $d4Broker.innerHTML = 'MQTT Broker 状态：<b style="color:' +
@@ -1104,6 +1183,10 @@
       // D4：每秒巡检节点在线状态；手动重连按钮
       setInterval(d4Tick, 1000);
       document.getElementById('btn-reconnect').addEventListener('click', d4ManualReconnect);
+
+      // 数据链A：开始/停止记录 + 导出 CSV
+      $btnRecToggle.addEventListener('click', recToggle);
+      $btnRecExport.addEventListener('click', recExportCsv);
 
       renderAll(); // 初始渲染：所有模块显示等待状态
     })();

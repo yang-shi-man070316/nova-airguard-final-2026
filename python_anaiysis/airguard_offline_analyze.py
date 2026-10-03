@@ -156,7 +156,7 @@ def row_samples(df, n=5):
     return html.escape(df[cols].head(n).to_string(index=False))
 
 
-def build_html(args, n_total, checks, n_clean, mismatch, stats, status_ct, crowd_ct, abnormal,
+def build_html(args, n_hist, n_new, n_dedup, n_bad, checks, n_clean, mismatch, stats, status_ct, crowd_ct, abnormal,
                fig_pm25, fig_co2, fig_status, fig_crowd, fig_timeline):
     img = lambda f: '<img src="data:image/png;base64,%s" alt="chart">' % fig_to_base64(f)
 
@@ -201,8 +201,6 @@ def build_html(args, n_total, checks, n_clean, mismatch, stats, status_ct, crowd
         tl.columns = ['时间', '区域', '异常等级', 'pm25', 'co2', 'crowdLevel']
         timeline_html = tl.head(100).to_html(index=False)
 
-    check_summary = sum(c[1] for c in checks)
-
     page = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -214,7 +212,7 @@ def build_html(args, n_total, checks, n_clean, mismatch, stats, status_ct, crowd
 <body>
 <div class="wrap">
 <h1>AirGuard 数据链A · 离线分析报告</h1>
-<p class="meta">输入 CSV：{input_file} ｜ 总记录 {n_total} 条，数据质量剔除 {n_bad} 条，有效记录 {n_clean} 条 ｜ 生成时间：{gen_time}</p>
+<p class="meta">输入 CSV：{input_file} ｜ 历史累计 {n_hist} 条 + 本次新增 {n_new} 条，合并去重 {n_dedup} 条，质量剔除 {n_bad} 条，累计有效 {n_clean} 条 ｜ 生成时间：{gen_time}</p>
 
 <h2>1 数据质量校验</h2>
 <div class="card">
@@ -246,14 +244,16 @@ def build_html(args, n_total, checks, n_clean, mismatch, stats, status_ct, crowd
 <h2>7 事件时间线（异常记录）</h2>
 <div class="card">{img_timeline}{timeline_html}</div>
 
-<footer>AirGuard 数据链A 离线分析 · 图表与样式全部内嵌，无外部依赖 · 更换 CSV 输入可全自动重新生成</footer>
+<footer>AirGuard 数据链A 离线分析 · 图表与样式全部内嵌，无外部依赖 · 累计数据集 report/history_merged.csv 每次运行自动累加，更换 CSV 输入可全自动重新生成</footer>
 </div>
 </body>
 </html>""".format(
         css=CSS,
         input_file=html.escape(os.path.basename(args.input)),
-        n_total=n_total,
-        n_bad=check_summary,
+        n_hist=n_hist,
+        n_new=n_new,
+        n_dedup=n_dedup,
+        n_bad=n_bad,
         n_clean=n_clean,
         gen_time=datetime.now().strftime(TIME_FMT),
         check_rows=check_rows,
@@ -273,7 +273,7 @@ def build_html(args, n_total, checks, n_clean, mismatch, stats, status_ct, crowd
 
 # ============ 主流程 ============
 def main():
-    ap = argparse.ArgumentParser(description='AirGuard 数据链A离线分析：CSV → 统计/趋势 → report.html')
+    ap = argparse.ArgumentParser(description='AirGuard 数据链A离线分析：CSV → 统计/趋势 → report.html（增量合并）')
     ap.add_argument('input', help='输入 CSV 文件路径（字段：zoneId,pm25,co2,crowdLevel,status,time）')
     ap.add_argument('--out', default='report', help='输出目录（默认 report）')
     args = ap.parse_args()
@@ -282,12 +282,13 @@ def main():
         print('[错误] 输入文件不存在:', args.input)
         sys.exit(1)
 
-    # ---- 读取 CSV ----
+    # ---- 读取本次输入 CSV ----
     try:
         raw = pd.read_csv(args.input)
     except Exception as e:
         print('[错误] CSV 读取失败:', e)
         sys.exit(1)
+    n_new = len(raw)
 
     # ---- 字段级检查：必需列缺失则中止 ----
     missing_cols = [c for c in REQUIRED_COLS if c not in raw.columns]
@@ -295,13 +296,24 @@ def main():
         print('[错误] CSV 缺少必需字段:', missing_cols, '（要求：%s）' % ', '.join(REQUIRED_COLS))
         sys.exit(1)
 
+    # ---- 与历史累计数据集合并：原数据不变，新 CSV 增量追加 ----
+    history_path = os.path.join(args.out, 'history_merged.csv')
+    n_hist = 0
+    if os.path.isfile(history_path):
+        try:
+            hist = pd.read_csv(history_path)
+            n_hist = len(hist)
+            raw = pd.concat([hist, raw], ignore_index=True)
+            print('[信息] 已合并历史累计数据 %d 条' % n_hist)
+        except Exception as e:
+            print('[警告] 历史数据集读取失败（本次仅使用输入数据）:', e)
+
     # 统一转类型：非法值转 NaN 进入质量检查，time 按统一格式解析
     raw['pm25'] = pd.to_numeric(raw['pm25'], errors='coerce')
     raw['co2'] = pd.to_numeric(raw['co2'], errors='coerce')
     raw['crowdLevel'] = pd.to_numeric(raw['crowdLevel'], errors='coerce')
     raw['time'] = pd.to_datetime(raw['time'], format=TIME_FMT, errors='coerce')
     raw['status'] = raw['status'].astype(str).str.strip()
-    n_total = len(raw)
 
     # ---- 数据质量校验（逐项统计 + 示例） ----
     checks = []
@@ -325,6 +337,15 @@ def main():
     if clean.empty:
         print('[错误] 清洗后无有效数据，无法生成报告')
         sys.exit(1)
+
+    # ---- 合并去重：zoneId+time 相同视为同一条记录，保留后到（新）记录 ----
+    n_before_dedup = len(clean)
+    clean = clean.drop_duplicates(subset=['zoneId', 'time'], keep='last')
+    n_dedup = n_before_dedup - len(clean)
+    clean = clean.sort_values('time').reset_index(drop=True)
+
+    # ---- 累计数据集写回（供下次运行继续累加） ----
+    clean.to_csv(history_path, index=False, encoding='utf-8-sig')
 
     # ---- status 合规性校验：用统一判级规则重算，与 CSV 中 status 对比（仅提示，不修改数据） ----
     clean['status_calc'] = clean.apply(lambda r: calc_status(r['pm25'], r['co2']), axis=1)
@@ -350,7 +371,8 @@ def main():
     fig_timeline = build_event_timeline_fig(abnormal) if not abnormal.empty else None
 
     # ---- 生成单文件报告 ----
-    page = build_html(args, n_total, checks, len(clean), mismatch, stats, status_ct, crowd_ct,
+    n_bad = sum(c[1] for c in checks)
+    page = build_html(args, n_hist, n_new, n_dedup, n_bad, checks, len(clean), mismatch, stats, status_ct, crowd_ct,
                       abnormal, fig_pm25, fig_co2, fig_status, fig_crowd, fig_timeline)
 
     out_dir = args.out
@@ -360,11 +382,13 @@ def main():
         f.write(page)
 
     print('=' * 52)
-    print('AirGuard 数据链A 离线分析完成')
+    print('AirGuard 数据链A 离线分析完成（增量合并）')
     print('  输入文件: %s' % args.input)
-    print('  总记录: %d 条，质量剔除: %d 条，有效记录: %d 条' % (n_total, sum(c[1] for c in checks), len(clean)))
+    print('  历史累计: %d 条 + 本次新增: %d 条，合并去重: %d 条，质量剔除: %d 条，累计有效: %d 条'
+          % (n_hist, n_new, n_dedup, n_bad, len(clean)))
     print('  status 不合规记录: %d 条（仅提示，不修改数据）' % len(mismatch))
     print('  异常事件记录: %d 条' % len(abnormal))
+    print('  累计数据集: %s' % os.path.abspath(history_path))
     print('  报告已生成: %s' % os.path.abspath(out_path))
     print('=' * 52)
 
