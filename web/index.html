@@ -140,7 +140,6 @@
       border: 1px dashed #cbd5e1;
       border-radius: 8px;
       padding: 18px 12px;
-      cursor: pointer;
     }
     .map-block { flex: 1; text-align: center; }
     .map-block .cube {
@@ -158,6 +157,20 @@
     .map-block .cube .b-name { font-size: 14px; font-weight: 600; color: var(--text); }
     .map-block .cube .b-status { font-size: 12px; color: var(--text); }
     .panel-hint { margin-top: 10px; font-size: 12px; color: var(--muted); text-align: center; }
+    .btn-3d {
+      display: block;
+      width: 100%;
+      margin-top: 10px;
+      padding: 9px 0;
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+      background: #2563eb;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .btn-3d:hover { background: #1d4ed8; }
 
     /* ===== 下方：事件与系统概览面板（D2/D3 预留） ===== */
     #panel-overview { grid-column: 1 / -1; }
@@ -218,14 +231,15 @@
       <div id="monitor-cards" class="monitor-grid"></div>
     </section>
 
-    <!-- ===== 右上：地图/3D 模块预览占位面板（E1） ===== -->
-    <!-- 此处仅为总视图内的预览窗口；完整 three-min 3D 数字孪生页面后续单独生成 -->
+    <!-- ===== 右上：地图/3D 模块预览面板（E1） ===== -->
+    <!-- 底部按钮跳转独立 3D 数字孪生页面 three3d/three-min.html -->
     <section class="panel" id="panel-3d">
       <div class="panel-head">
         <h2>校园空间视图（地图/3D 预览）<span class="tag">E1</span></h2>
       </div>
-      <div id="map3d" class="map3d" title="独立 3D 页面待接入"></div>
-      <p class="panel-hint">点击跳转独立 3D 页面查看完整数字孪生场景（待接入）</p>
+      <div id="map3d" class="map3d"></div>
+      <p class="panel-hint">3D 色块与区域状态实时同步 · 完整数字孪生场景见独立页面</p>
+      <button id="btn-open3d" class="btn-3d" type="button">进入 3D 校园视图 →</button>
     </section>
 
     <!-- ===== 下方：事件与系统概览面板（D2/D3 预留） ===== -->
@@ -259,6 +273,8 @@
       // ============ 配置 ============
       const MQTT_URL = 'ws://127.0.0.1:8083/mqtt';
       const TOPIC = 'airguard/+/env';
+      // 独立 3D 数字孪生页面（web/ 上一级的 three3d/three-min.html）
+      const THREE_PAGE_URL = '../three3d/three-min.html';
 
       // 区域配置：zoneId → 中文名
       const ZONES = {
@@ -456,11 +472,10 @@
 
       // TODO(D2): 优先关注区域计算逻辑后续在此接入，结果渲染到 #priority-zone 容器
       // TODO(D3): 事件状态机后续在此扩展（事件分级、去重、生命周期管理等）
-      // TODO(E1): 完整 3D 页面（three-min 数字孪生）后续单独生成，此处仅总视图预览
 
-      // E1 预览面板点击：独立 3D 页面待接入
-      $map3d.addEventListener('click', function () {
-        console.info('[AirGuard] 独立 3D 页面待接入（three-min 完整数字孪生场景）');
+      // E1 预览面板按钮：跳转独立 3D 数字孪生页面（three-min.html）
+      document.getElementById('btn-open3d').addEventListener('click', function () {
+        window.location.href = THREE_PAGE_URL;
       });
 
       // ============ MQTT 连接 ============

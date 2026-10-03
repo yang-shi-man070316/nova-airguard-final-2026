@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AirGuard 3D 校园孪生视图 · D1</title>
+  <!-- three.js UMD + mqtt.js UMD，全部走 CDN，无本地静态文件 -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mqtt@5/dist/mqtt.min.js"></script>
+  <style>
+    :root {
+      --bg: #eef1f5;
+      --panel-bg: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --nav-bg: #0f172a;
+      --wait-bg: #f5f5f5;
+      --wait-accent: #9ca3af;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ===== 顶部导航栏 ===== */
+    .topbar {
+      background: var(--nav-bg);
+      color: #e5e7eb;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      padding: 12px 24px;
+      flex-shrink: 0;
+    }
+    .topbar h1 { font-size: 18px; color: #fff; letter-spacing: .5px; }
+    .topbar .sub { font-size: 12px; color: #94a3b8; margin-top: 2px; }
+    #conn { display: inline-flex; align-items: center; gap: 6px; color: #cbd5e1; font-size: 13px; }
+    #conn .dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--wait-accent);
+    }
+    #conn.on .dot { background: #22c55e; }
+    #conn.off .dot { background: #ef4444; }
+
+    /* ===== 主体：左侧数据面板 + 右侧 3D 画布 ===== */
+    .layout {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      gap: 16px;
+      padding: 16px 24px;
+      max-width: 1600px;
+      width: 100%;
+      margin: 0 auto;
+    }
+    .side-panel {
+      width: 300px;
+      flex-shrink: 0;
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      overflow-y: auto;
+    }
+    .side-panel h2 {
+      font-size: 15px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+      margin-bottom: 12px;
+    }
+    .zone-id { font-size: 11px; color: var(--muted); font-family: Consolas, monospace; }
+    .zone-item {
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--wait-accent);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+      background: var(--wait-bg);
+    }
+    .zi-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .zi-head b { font-size: 15px; }
+    .zi-badge {
+      font-size: 12px;
+      color: #fff;
+      background: var(--wait-accent);
+      padding: 2px 9px;
+      border-radius: 999px;
+      margin-left: auto;
+      white-space: nowrap;
+    }
+    .zi-metrics { list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
+    .zi-metrics li { font-size: 12px; color: var(--muted); }
+    .zi-metrics b {
+      display: block;
+      font-size: 14px;
+      color: var(--text);
+      font-weight: 600;
+    }
+    .zi-empty { color: var(--muted); font-size: 13px; }
+
+    .canvas-wrap {
+      flex: 1;
+      min-width: 0;
+      position: relative;
+      background: #eef1f5;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .canvas-wrap .op-hint {
+      position: absolute;
+      right: 12px;
+      bottom: 10px;
+      font-size: 11px;
+      color: var(--muted);
+      pointer-events: none;
+      z-index: 2;
+    }
+    .placeholder {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #94a3b8;
+      font-size: 13px;
+      text-align: center;
+      z-index: 3;
+      background: var(--bg);
+    }
+
+    @media (max-width: 900px) {
+      body { overflow: auto; }
+      .layout { flex-direction: column; }
+      .side-panel { width: auto; max-height: 45vh; }
+      .canvas-wrap { min-height: 55vh; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>AirGuard 3D 校园孪生视图</h1>
+      <div class="sub">D1 · MQTT 实时数据驱动 · 拖拽旋转 / 滚轮缩放</div>
+    </div>
+    <span id="conn"><span class="dot"></span><span id="conn-text">连接中…</span></span>
+  </header>
+
+  <main class="layout">
+    <aside class="side-panel">
+      <h2>区域实时数据</h2>
+      <div id="zone-panel"></div>
+    </aside>
+    <section class="canvas-wrap" id="canvas-wrap">
+      <div id="three-fallback" class="placeholder" style="display:none">Three.js CDN 加载失败，请检查网络后刷新</div>
+      <div class="op-hint">拖拽旋转 · 滚轮缩放</div>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      'use strict';
+
+      // ============ MQTT / 数据契约配置 ============
+      const MQTT_URL = 'ws://127.0.0.1:8083/mqtt';
+      const TOPIC = 'airguard/+/env';
+
+      const ZONES = {
+        'zone-n': { name: '宿舍区' },
+        'zone-s': { name: '教学区' },
+        'zone-w': { name: '食堂区' },
+      };
+      const ZONE_IDS = Object.keys(ZONES);
+
+      // 三区域状态独立存储，只按 zone 键更新，严禁串数据
+      const zoneState = ZONE_IDS.reduce(function (acc, z) { acc[z] = null; return acc; }, {});
+
+      // 立方体颜色（任务书规定）；文字/面板强调色
+      const STATUS_COLORS = {
+        '正常': 0x81c784,
+        '轻度污染': 0xffd54f,
+        '重度污染': 0xe53935,
+        '通风不足风险': 0xba68c8,
+      };
+      const STATUS_BG = {
+        '正常': '#e8f5e9',
+        '轻度污染': '#fff8e1',
+        '重度污染': '#ffebee',
+        '通风不足风险': '#f3e5f5',
+      };
+      const STATUS_ACCENT = {
+        '正常': '#2e7d32',
+        '轻度污染': '#f57f17',
+        '重度污染': '#c62828',
+        '通风不足风险': '#7b1fa2',
+      };
+      const WAIT_COLOR = 0x9e9e9e;
+      const WAIT_BG = '#f5f5f5';
+      const WAIT_ACCENT = '#9ca3af';
+
+      const CROWD_LEVELS = { 0: '稀疏', 1: '正常', 2: '拥挤', 3: '严重拥挤' };
+
+      // ============ DOM ============
+      const $conn = document.getElementById('conn');
+      const $connText = document.getElementById('conn-text');
+      const $zonePanel = document.getElementById('zone-panel');
+      const $canvasWrap = document.getElementById('canvas-wrap');
+
+      // ============ status 计算（任务书顺序，仅用 pm25 / co2） ============
+      function calcStatus(pm25, co2) {
+        if (pm25 > 150) return '重度污染';
+        if (pm25 > 75) return '轻度污染';
+        if (co2 >= 1500) return '通风不足风险';
+        return '正常';
+      }
+
+      function crowdText(crowdLevel) {
+        if (crowdLevel === undefined || crowdLevel === null || crowdLevel === '') return '--';
+        const v = Number(crowdLevel);
+        return Object.prototype.hasOwnProperty.call(CROWD_LEVELS, v) ? CROWD_LEVELS[v] : crowdLevel;
+      }
+
+      const fmt = function (x) { return (x === undefined || x === null || x === '' ? '--' : x); };
+
+      function setConn(state, text) {
+        $conn.className = state;
+        $connText.textContent = text || (
+          state === 'on' ? '已连接 ' + MQTT_URL :
+          state === 'off' ? '连接断开，自动重连中…' : '连接中…'
+        );
+      }
+
+      // 数据契约字段为 zoneId；兼容小写 zoneid；缺失时退回 topic 中间段；不认识则丢弃
+      function resolveZone(topic, payload) {
+        const z = (payload && (payload.zoneId || payload.zoneid)) || topic.split('/')[1] || '';
+        return Object.prototype.hasOwnProperty.call(ZONES, z) ? z : null;
+      }
+
+      // ============ 3D 场景 ============
+      let scene, camera, renderer;
+      const buildings = {}; // zone → { group, walls }（建筑组 + 随状态变色的墙体贴图）
+      let clockFace = null; // 教学区钟楼钟盘纹理（每 30 秒对时）
+      const labels = {};    // zone → 文字标签
+      const TARGET = new THREE.Vector3(0, 3, 0);
+      let theta = 0.8, phi = 1.05, radius = 34; // 轨道参数：水平角 / 俯仰角 / 距离
+      let dragging = false, lastX = 0, lastY = 0;
+
+      function initScene() {
+        if (!window.THREE) {
+          document.getElementById('three-fallback').style.display = 'flex';
+          return;
+        }
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xeef1f5);
+
+        camera = new THREE.PerspectiveCamera(45, $canvasWrap.clientWidth / $canvasWrap.clientHeight, 0.1, 300);
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setSize($canvasWrap.clientWidth, $canvasWrap.clientHeight);
+        $canvasWrap.appendChild(renderer.domElement);
+
+        // 灯光（暖色半球光 + 暖阳方向光，开启柔和阴影）
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        scene.add(new THREE.HemisphereLight(0xffffff, 0xd8e8c8, 0.7));
+        const dirLight = new THREE.DirectionalLight(0xfff3dc, 1.0);
+        dirLight.position.set(15, 25, 12);
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.set(1024, 1024);
+        dirLight.shadow.camera.left = -30;
+        dirLight.shadow.camera.right = 30;
+        dirLight.shadow.camera.top = 30;
+        dirLight.shadow.camera.bottom = -30;
+        dirLight.shadow.camera.near = 1;
+        dirLight.shadow.camera.far = 80;
+        scene.add(dirLight);
+
+        // 天空渐变背景 + 草地 + 暖色步行道 + 树木灌木 + 远景雾
+        scene.background = makeSkyTexture();
+
+        const ground = new THREE.Mesh(
+          new THREE.PlaneGeometry(160, 120),
+          new THREE.MeshLambertMaterial({ color: 0xa5d6a7 })
+        );
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // 建筑前横向步行道（暖沙色）
+        const walkway = mesh(new THREE.BoxGeometry(56, 0.02, 1.6), lambert(0xeee3cc), 0, 0.011, 5.5);
+        walkway.castShadow = false;
+        walkway.receiveShadow = true;
+        scene.add(walkway);
+        // 各建筑与步行道之间的连接小路
+        ZONE_IDS.forEach(function (z, i) {
+          const stub = mesh(new THREE.BoxGeometry(1.2, 0.02, 2.2), lambert(0xeee3cc), [-14, 0, 14][i], 0.011, 4.8);
+          stub.castShadow = false;
+          stub.receiveShadow = true;
+          scene.add(stub);
+        });
+
+        // 低多边形树木与灌木（环绕布置，不遮挡建筑）
+        const TREES = [
+          [-18, -6.5, 1.0], [-13, -7.0, 1.15], [-7, -6.5, 0.9],
+          [7, -6.5, 0.9], [13, -7.0, 1.15], [18, -6.5, 1.0],
+          [-14, 8.8, 1.1], [0, 8.8, 1.25], [14, 8.8, 1.1],
+          [-23, 1, 0.85], [23, 1, 0.85],
+        ];
+        TREES.forEach(function (t) {
+          const tree = makeTree(t[2]);
+          tree.position.set(t[0], 0, t[1]);
+          scene.add(tree);
+        });
+        const BUSHES = [[-18, 6.8], [-9, 6.8], [0, 6.8], [9, 6.8], [18, 6.8]];
+        BUSHES.forEach(function (b, i) {
+          scene.add(mesh(new THREE.SphereGeometry(0.32, 8, 8), lambert(i % 2 ? 0x81c784 : 0x66bb6a), b[0], 0.32, b[1]));
+        });
+
+        scene.fog = new THREE.Fog(0xe3eef7, 80, 160);
+
+        // 三个特色建筑：左宿舍区、中教学区、右食堂区；顶部为 2D 文字标签
+        const POS = { 'zone-n': -14, 'zone-s': 0, 'zone-w': 14 };
+        const LABEL_Y = { 'zone-n': 7.0, 'zone-s': 13.6, 'zone-w': 7.4 };
+        const BUILDERS = { 'zone-n': buildDormitory, 'zone-s': buildTeaching, 'zone-w': buildCanteen };
+        ZONE_IDS.forEach(function (z) {
+          const b = BUILDERS[z]();
+          b.group.position.x = POS[z];
+          scene.add(b.group);
+          buildings[z] = b;
+
+          labels[z] = makeLabel();
+          labels[z].sprite.position.set(POS[z], LABEL_Y[z], 0);
+          scene.add(labels[z].sprite);
+        });
+
+        // 自定义简单控制器：拖拽旋转 + 滚轮缩放
+        const el = renderer.domElement;
+        el.style.cursor = 'grab';
+        el.addEventListener('pointerdown', function (e) {
+          dragging = true;
+          lastX = e.clientX;
+          lastY = e.clientY;
+          el.style.cursor = 'grabbing';
+          el.setPointerCapture(e.pointerId);
+        });
+        el.addEventListener('pointermove', function (e) {
+          if (!dragging) return;
+          theta -= (e.clientX - lastX) * 0.005;
+          phi = Math.min(1.5, Math.max(0.2, phi - (e.clientY - lastY) * 0.005));
+          lastX = e.clientX;
+          lastY = e.clientY;
+        });
+        el.addEventListener('pointerup', function (e) {
+          dragging = false;
+          el.style.cursor = 'grab';
+          el.releasePointerCapture(e.pointerId);
+        });
+        el.addEventListener('wheel', function (e) {
+          e.preventDefault();
+          radius = Math.min(70, Math.max(12, radius * (1 + e.deltaY * 0.001)));
+        }, { passive: false });
+
+        window.addEventListener('resize', function () {
+          camera.aspect = $canvasWrap.clientWidth / $canvasWrap.clientHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize($canvasWrap.clientWidth, $canvasWrap.clientHeight);
+        });
+
+        animate();
+      }
+
+      function makeLabel() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 512;
+        canvas.height = 160;
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.minFilter = THREE.LinearFilter;
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+          map: texture,
+          depthTest: false,
+          transparent: true,
+        }));
+        sprite.scale.set(11, 11 * 160 / 512, 1);
+        return { canvas: canvas, texture: texture, sprite: sprite };
+      }
+
+      function updateLabel(label, zone, d) {
+        const ctx = label.canvas.getContext('2d');
+        ctx.clearRect(0, 0, 512, 160);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = 'bold 44px "Microsoft YaHei", "Segoe UI", sans-serif';
+        ctx.fillStyle = '#1f2937';
+        ctx.fillText(ZONES[zone].name, 256, 50);
+        ctx.font = 'bold 38px "Microsoft YaHei", "Segoe UI", sans-serif';
+        ctx.fillStyle = d ? (STATUS_ACCENT[d.status] || WAIT_ACCENT) : WAIT_ACCENT;
+        ctx.fillText(d ? d.status : '暂无数据', 256, 112);
+        label.texture.needsUpdate = true;
+      }
+
+      function updateScene() {
+        if (!renderer) return;
+        ZONE_IDS.forEach(function (z) {
+          const d = zoneState[z];
+          const hex = d
+            ? (STATUS_COLORS[d.status] !== undefined ? STATUS_COLORS[d.status] : WAIT_COLOR)
+            : WAIT_COLOR;
+          // 重绘该区域所有墙体贴图（换色），屋顶/底座保持中性色
+          buildings[z].walls.forEach(function (w) { repaintWall(w, hex); });
+          updateLabel(labels[z], z, d);
+        });
+      }
+
+      // ============ 墙体贴图（Canvas 生成窗户网格，随状态重绘换色） ============
+      function makeWall(rows, cols) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 256;
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.minFilter = THREE.LinearFilter;
+        const wall = { canvas: canvas, texture: texture, rows: rows, cols: cols };
+        repaintWall(wall, WAIT_COLOR);
+        return wall;
+      }
+
+      function repaintWall(wall, hex) {
+        const ctx = wall.canvas.getContext('2d');
+        const s = wall.canvas.width;
+        ctx.fillStyle = '#' + hex.toString(16).padStart(6, '0');
+        ctx.fillRect(0, 0, s, s);
+        // 深色窗户网格
+        ctx.fillStyle = '#263238';
+        const pad = 10;
+        const gx = (s - pad * 2) / wall.cols;
+        const gy = (s - pad * 2) / wall.rows;
+        for (let r = 0; r < wall.rows; r++) {
+          for (let c = 0; c < wall.cols; c++) {
+            ctx.fillRect(pad + c * gx + gx * 0.15, pad + r * gy + gy * 0.15, gx * 0.7, gy * 0.7);
+          }
+        }
+        wall.texture.needsUpdate = true;
+      }
+
+      // ============ 环境辅助：天空渐变 + 低多边形树木 ============
+      function makeSkyTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 2;
+        canvas.height = 512;
+        const ctx = canvas.getContext('2d');
+        const g = ctx.createLinearGradient(0, 0, 0, 512);
+        g.addColorStop(0, '#7ec3ee');   // 顶部天蓝
+        g.addColorStop(0.55, '#bfe0f5'); // 中部浅蓝
+        g.addColorStop(1, '#fdf6e3');   // 地平线暖白
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, 2, 512);
+        return new THREE.CanvasTexture(canvas);
+      }
+
+      function makeTree(s) {
+        const g = new THREE.Group();
+        g.add(mesh(new THREE.CylinderGeometry(0.14, 0.18, 0.9, 8), lambert(0x8d6e63), 0, 0.45, 0));
+        g.add(mesh(new THREE.ConeGeometry(0.85, 1.6, 7), lambert(0x66bb6a), 0, 1.5, 0));
+        g.add(mesh(new THREE.ConeGeometry(0.6, 1.2, 7), lambert(0x81c784), 0, 2.3, 0));
+        g.scale.setScalar(s);
+        return g;
+      }
+
+      // ============ 钟盘纹理（教学区钟楼） ============
+      function makeClockTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 256;
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.minFilter = THREE.LinearFilter;
+        const clock = { canvas: canvas, texture: texture };
+        drawClock(clock);
+        return clock;
+      }
+
+      function drawClock(clock) {
+        const ctx = clock.canvas.getContext('2d');
+        const s = clock.canvas.width;
+        const c = s / 2;
+        const r = c - 8;
+        ctx.clearRect(0, 0, s, s);
+        // 白色钟面 + 深色圆框
+        ctx.fillStyle = '#fafafa';
+        ctx.beginPath();
+        ctx.arc(c, c, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineWidth = 6;
+        ctx.strokeStyle = '#37474f';
+        ctx.beginPath();
+        ctx.arc(c, c, r - 3, 0, Math.PI * 2);
+        ctx.stroke();
+        // 12 个整点刻度
+        ctx.lineWidth = 4;
+        for (let i = 0; i < 12; i++) {
+          const a = i / 12 * Math.PI * 2;
+          ctx.beginPath();
+          ctx.moveTo(c + Math.cos(a) * (r - 16), c + Math.sin(a) * (r - 16));
+          ctx.lineTo(c + Math.cos(a) * (r - 6), c + Math.sin(a) * (r - 6));
+          ctx.stroke();
+        }
+        // 指针按当前时间
+        const now = new Date();
+        const h = (now.getHours() % 12 + now.getMinutes() / 60) / 12 * Math.PI * 2 - Math.PI / 2;
+        const m = now.getMinutes() / 60 * Math.PI * 2 - Math.PI / 2;
+        ctx.lineWidth = 8;
+        ctx.beginPath();
+        ctx.moveTo(c, c);
+        ctx.lineTo(c + Math.cos(h) * (r - 52), c + Math.sin(h) * (r - 52));
+        ctx.stroke();
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(c, c);
+        ctx.lineTo(c + Math.cos(m) * (r - 28), c + Math.sin(m) * (r - 28));
+        ctx.stroke();
+        // 轴心
+        ctx.fillStyle = '#37474f';
+        ctx.beginPath();
+        ctx.arc(c, c, 6, 0, Math.PI * 2);
+        ctx.fill();
+        clock.texture.needsUpdate = true;
+      }
+
+      // ============ 建筑构件辅助 ============
+      const NEUTRAL_ROOF = 0xb0bec5; // 屋顶 / 装饰件固定中性色
+      const NEUTRAL_BASE = 0xcfd8dc; // 底座固定中性色
+
+      function lambert(color, wall) {
+        return wall ? new THREE.MeshLambertMaterial({ map: wall.texture }) : new THREE.MeshLambertMaterial({ color: color });
+      }
+
+      function mesh(geometry, material, x, y, z) {
+        const m = new THREE.Mesh(geometry, material);
+        m.position.set(x, y, z);
+        m.castShadow = true;
+        m.receiveShadow = true;
+        return m;
+      }
+
+      function addBase(group, w, d) {
+        group.add(mesh(new THREE.BoxGeometry(w, 0.15, d), lambert(NEUTRAL_BASE), 0, 0.075, 0));
+      }
+
+      // 宿舍区：三栋高低错落的公寓楼，平屋顶
+      function buildDormitory() {
+        const group = new THREE.Group();
+        const walls = [];
+        const specs = [
+          { z: -3.2, h: 3.6 },
+          { z: 0, h: 4.8 },
+          { z: 3.2, h: 3.6 },
+        ];
+        specs.forEach(function (spec) {
+          const wall = makeWall(4, 3);
+          walls.push(wall);
+          group.add(mesh(new THREE.BoxGeometry(4.4, spec.h, 2.8), lambert(null, wall), 0, spec.h / 2, spec.z));
+          group.add(mesh(new THREE.BoxGeometry(4.8, 0.2, 3.2), lambert(NEUTRAL_ROOF), 0, spec.h + 0.1, spec.z));
+        });
+        addBase(group, 6.2, 9.6);
+        return { group: group, walls: walls };
+      }
+
+      // 教学区：裙楼 + 钟楼主楼（塔顶前后两面钟盘 + 四棱锥尖顶）
+      function buildTeaching() {
+        const group = new THREE.Group();
+        const walls = [];
+
+        const podiumWall = makeWall(2, 6);
+        walls.push(podiumWall);
+        group.add(mesh(new THREE.BoxGeometry(10, 2.8, 6), lambert(null, podiumWall), 0, 1.4, 0));
+
+        const towerWall = makeWall(5, 3);
+        walls.push(towerWall);
+        group.add(mesh(new THREE.BoxGeometry(4.2, 5.6, 4.2), lambert(null, towerWall), 0, 2.8 + 2.8, 0));
+
+        // 钟楼冠层：+z/−z 两面为白底钟盘（固定不变色），其余面随状态换色
+        clockFace = makeClockTexture();
+        const crownWall = makeWall(1, 3);
+        walls.push(crownWall);
+        const crownMats = [
+          lambert(null, crownWall), lambert(null, crownWall),      // ±x
+          lambert(NEUTRAL_ROOF), lambert(NEUTRAL_ROOF),            // ±y
+          new THREE.MeshLambertMaterial({ map: clockFace.texture }), // +z 钟盘
+          new THREE.MeshLambertMaterial({ map: clockFace.texture }), // −z 钟盘
+        ];
+        group.add(mesh(new THREE.BoxGeometry(4.6, 2.2, 4.6), crownMats, 0, 9.5, 0));
+
+        // 四棱锥尖顶 + 顶珠
+        const spire = mesh(new THREE.ConeGeometry(3.3, 2.2, 4), lambert(NEUTRAL_ROOF), 0, 11.7, 0);
+        spire.rotation.y = Math.PI / 4;
+        group.add(spire);
+        group.add(mesh(new THREE.SphereGeometry(0.2, 12, 12), lambert(NEUTRAL_ROOF), 0, 12.95, 0));
+
+        addBase(group, 11, 7);
+        return { group: group, walls: walls };
+      }
+
+      // 食堂区：单层大跨度食堂 + 人字坡屋顶 + 烟囱
+      function buildCanteen() {
+        const group = new THREE.Group();
+        const walls = [];
+
+        const hallWall = makeWall(2, 5);
+        walls.push(hallWall);
+        group.add(mesh(new THREE.BoxGeometry(10, 3.2, 6), lambert(null, hallWall), 0, 1.6, 0));
+
+        // 人字坡屋顶：三角形截面沿长度挤出（两端出檐）
+        const shape = new THREE.Shape();
+        shape.moveTo(-3.4, 0);
+        shape.lineTo(3.4, 0);
+        shape.lineTo(0, 2.4);
+        shape.closePath();
+        const roofGeo = new THREE.ExtrudeGeometry(shape, { depth: 10, bevelEnabled: false });
+        roofGeo.translate(0, 0, -5); // 挤出方向沿 z，平移使长度居中
+        const roof = mesh(roofGeo, lambert(NEUTRAL_ROOF), 0, 3.2, 0);
+        roof.rotation.y = Math.PI / 2; // 屋脊方向转至 x
+        group.add(roof);
+
+        // 烟囱（从坡面穿出）
+        group.add(mesh(new THREE.CylinderGeometry(0.35, 0.45, 1.5, 12), lambert(0x90a4ae), 2.5, 5.7, -0.8));
+
+        addBase(group, 11, 7);
+        return { group: group, walls: walls };
+      }
+
+      function animate() {
+        requestAnimationFrame(animate);
+        camera.position.set(
+          TARGET.x + radius * Math.sin(phi) * Math.sin(theta),
+          TARGET.y + radius * Math.cos(phi),
+          TARGET.z + radius * Math.sin(phi) * Math.cos(theta)
+        );
+        camera.lookAt(TARGET);
+        renderer.render(scene, camera);
+      }
+
+      // ============ 左侧数据面板 ============
+      function renderPanel() {
+        $zonePanel.innerHTML = ZONE_IDS.map(function (zone) {
+          const d = zoneState[zone];
+          if (!d) {
+            return '<div class="zone-item">' +
+              '<div class="zi-head"><b>' + ZONES[zone].name + '</b>' +
+              '<span class="zone-id">' + zone + '</span>' +
+              '<span class="zi-badge">暂无数据</span></div>' +
+              '<p class="zi-empty">暂无实时数据</p>' +
+              '</div>';
+          }
+          const bg = STATUS_BG[d.status] || WAIT_BG;
+          const accent = STATUS_ACCENT[d.status] || WAIT_ACCENT;
+          return '<div class="zone-item" style="background:' + bg + ';border-left-color:' + accent + '">' +
+            '<div class="zi-head"><b>' + ZONES[zone].name + '</b>' +
+            '<span class="zone-id">' + zone + '</span>' +
+            '<span class="zi-badge" style="background:' + accent + '">' + d.status + '</span></div>' +
+            '<ul class="zi-metrics">' +
+            '<li>PM2.5<b>' + fmt(d.pm25) + '</b>μg/m³</li>' +
+            '<li>CO₂<b>' + fmt(d.co2) + '</b>ppm</li>' +
+            '<li>人流<b>' + crowdText(d.crowdLevel) + '</b></li>' +
+            '<li>上报时间<b>' + fmt(d.time) + '</b></li>' +
+            '</ul>' +
+            '</div>';
+        }).join('');
+      }
+
+      // ============ 消息处理 ============
+      function onEnvMessage(topic, payload) {
+        const zone = resolveZone(topic, payload);
+        if (!zone) {
+          console.warn('[AirGuard] 未知区域消息，已忽略:', topic);
+          return;
+        }
+        const status = calcStatus(payload.pm25, payload.co2);
+        // 只更新对应 zone，绝不写入其他区域
+        zoneState[zone] = {
+          zoneId: zone,
+          pm25: payload.pm25,
+          co2: payload.co2,
+          crowdLevel: payload.crowdLevel,
+          time: payload.time,
+          status: status,
+          receivedAt: new Date(),
+        };
+        renderPanel();
+        updateScene();
+      }
+
+      // ============ MQTT 连接 ============
+      const client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000 });
+
+      client.on('connect', function () {
+        setConn('on');
+        client.subscribe(TOPIC, function (err) {
+          if (err) console.error('[AirGuard] 订阅失败:', err);
+        });
+      });
+      client.on('close', function () { setConn('off'); });
+      client.on('offline', function () { setConn('off'); });
+      client.on('reconnect', function () { setConn(''); });
+      client.on('error', function (err) {
+        console.error('[AirGuard] MQTT 错误:', err);
+        setConn('off', '连接错误，自动重连中…');
+      });
+      client.on('message', function (topic, message) {
+        try {
+          const payload = JSON.parse(new TextDecoder().decode(message));
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            throw new Error('payload 不是对象');
+          }
+          onEnvMessage(topic, payload);
+        } catch (e) {
+          // 错误 JSON 不崩溃页面，仅控制台输出
+          console.error('[AirGuard] 消息解析失败:', e);
+        }
+      });
+
+      // ============ 初始化 ============
+      try {
+        initScene();
+      } catch (e) {
+        console.error('[AirGuard] 3D 场景初始化失败:', e);
+        document.getElementById('three-fallback').style.display = 'flex';
+      }
+      // 钟盘指针每 30 秒对时
+      setInterval(function () {
+        if (clockFace) drawClock(clockFace);
+      }, 30000);
+
+      renderPanel(); // 初始：三区域均为「暂无实时数据」，建筑墙体灰色
+    })();
+  </script>
+</body>
+</html>
