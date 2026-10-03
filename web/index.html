@@ -225,10 +225,43 @@
     .d2-table th { background: #f8fafc; color: var(--muted); font-weight: 600; }
     .d2-table tr.winner td { background: #fff8e6; font-weight: 600; }
 
+    /* ===== D3 干预—验证—恢复状态机 ===== */
+    #panel-d3 { grid-column: 1 / -1; }
+    .d3-empty { color: var(--muted); font-size: 13px; padding: 4px 0; }
+    .d3-event {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+      background: #f8fafc;
+    }
+    .d3-ev-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    .d3-ev-head b { font-size: 14px; }
+    .d3-badge { font-size: 12px; color: #fff; padding: 2px 10px; border-radius: 999px; white-space: nowrap; }
+    .d3-badge.open { background: #6b7280; }
+    .d3-badge.handling { background: #f59e0b; }
+    .d3-desc { font-size: 13px; color: var(--muted); margin-bottom: 8px; line-height: 1.6; }
+    .d3-review { color: #c62828; font-weight: 600; }
+    .d3-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .d3-btn {
+      font-size: 12px;
+      padding: 5px 14px;
+      border: 1px solid #2563eb;
+      color: #2563eb;
+      background: #fff;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .d3-btn:hover { background: #2563eb; color: #fff; }
+    #d3-history-details { margin-top: 4px; }
+    #d3-history-details summary { font-size: 13px; color: var(--muted); cursor: pointer; padding: 4px 0; }
+    .d3-h-item { font-size: 12px; color: var(--muted); padding: 6px 8px; border-bottom: 1px dashed var(--border); line-height: 1.5; }
+
     @media (max-width: 960px) {
       .layout { grid-template-columns: 1fr; }
       #panel-overview { grid-column: auto; }
       #panel-d2 { grid-column: auto; }
+      #panel-d3 { grid-column: auto; }
       .overview-grid { grid-template-columns: 1fr; }
     }
   </style>
@@ -304,6 +337,18 @@
         <tbody id="d2-tbody"></tbody>
       </table>
     </section>
+
+    <!-- ===== 下方：D3 干预—验证—恢复状态机 ===== -->
+    <section class="panel" id="panel-d3">
+      <div class="panel-head">
+        <h2>D3 干预—验证—恢复状态机<span class="tag">D3</span></h2>
+      </div>
+      <div id="d3-active"></div>
+      <details id="d3-history-details">
+        <summary>历史事件（已恢复）</summary>
+        <div id="d3-history"></div>
+      </details>
+    </section>
   </main>
 
   <script>
@@ -313,6 +358,8 @@
       // ============ 配置 ============
       const MQTT_URL = 'ws://127.0.0.1:8083/mqtt';
       const TOPIC = 'airguard/+/env';
+      // D3 干预指令主题：按钮点击后广播，三端（总视图 / 3D / 移动端）同步进入 HANDLING
+      const ACTION_TOPIC = 'airguard/+/action';
       // 独立 3D 数字孪生页面（web/ 上一级的 three3d/three-min.html）
       const THREE_PAGE_URL = '../three3d/three-min.html';
 
@@ -362,6 +409,19 @@
         return acc;
       }, {});
 
+      // ============ D3 干预—验证—恢复状态机 ============
+      // 状态转移硬编码（禁止非法跳转）：
+      //   无事件 --新异常--> OPEN --点击干预(人工)--> HANDLING --数据满足恢复条件--> RECOVERED
+      //   HANDLING --新数据显示异常仍在--> OPEN（干预无效，允许回退）
+      //   禁止：OPEN 直接到 RECOVERED；已 RECOVERED 事件迟到/重复消息不回滚（仅补充历史记录）
+      const D3_STATE = { OPEN: 'OPEN', HANDLING: 'HANDLING', RECOVERED: 'RECOVERED' };
+      const D3_ACTIONS = ['开启新风', '喷雾降尘', '限流疏导'];
+      const D3_RECOVER_STREAK = 2; // 连续正常报文次数阈值
+
+      const d3Events = {};        // zone → 活跃事件（OPEN / HANDLING）；RECOVERED 后置 null
+      const d3History = [];       // 已恢复事件历史（RECOVERED）
+      const zoneLastMsgTime = {}; // zone → 最近报文 time（重复/乱序判断）
+
       // 简易事件记录（D3 状态机后续迭代，当前仅记录异常状态变化）
       const eventLog = [];
       const EVENT_LOG_MAX = 100;
@@ -378,6 +438,8 @@
       const $d2Priority = document.getElementById('d2-priority');
       const $d2Reason = document.getElementById('d2-reason');
       const $d2Tbody = document.getElementById('d2-tbody');
+      const $d3Active = document.getElementById('d3-active');
+      const $d3History = document.getElementById('d3-history');
 
       // ============ status 计算（任务书：按顺序判定，仅用 pm25 / co2） ============
       function calcStatus(pm25, co2) {
@@ -419,6 +481,23 @@
           console.warn('[AirGuard] 未知区域消息，已忽略:', topic);
           return;
         }
+        // ===== 消息健壮性：zoneId+time 去重；乱序旧消息不覆盖新状态（迟到仅补充历史） =====
+        const msgTime = payload.time;
+        const lastTime = zoneLastMsgTime[zone];
+        if (msgTime && lastTime) {
+          if (msgTime === lastTime) {
+            console.log('[AirGuard] 重复消息已忽略:', zone, msgTime);
+            d3AppendLateNote(zone, payload, '重复报文');
+            return;
+          }
+          if (msgTime < lastTime) {
+            console.log('[AirGuard] 迟到消息，仅补充历史记录:', zone, msgTime);
+            d3AppendLateNote(zone, payload, '迟到报文');
+            return;
+          }
+        }
+        zoneLastMsgTime[zone] = msgTime || lastTime;
+
         const prev = zoneState[zone];
         const status = calcStatus(payload.pm25, payload.co2);
         // 只更新对应 zone 的条目，绝不写入其他区域
@@ -437,6 +516,9 @@
         };
         // D2：更新该 zone 的连续异常计数与风险总分（区域独立）
         updateD2(zone, status, payload.crowdLevel, payload.crowdSource, payload.crowdConfidence);
+
+        // D3：驱动状态机（数据触发；OPEN→HANDLING 仅由按钮人工触发）
+        d3HandleMessage(zone, payload, status);
 
         // 简易事件记录：仅当状态变为异常（非“正常”）时追加一条，避免重复消息刷屏
         if (status !== '正常' && (!prev || prev.status !== status)) {
@@ -459,6 +541,7 @@
         renderMap3D();
         renderOverview();
         renderD2();
+        renderD3();
       }
 
       function renderTopbar() {
@@ -630,7 +713,175 @@
         }).join('');
       }
 
-      // TODO(D3): 事件状态机后续在此扩展（事件分级、去重、生命周期管理等）
+      // ============ D3：事件创建 / 状态转移 / 干预 / 渲染 ============
+      function d3CreateEvent(zone, payload, status) {
+        const ev = {
+          event_id: 'EVT-' + zone + '-' + Date.now(),
+          zoneId: zone,
+          startTime: payload.time || new Date().toLocaleString('zh-CN', { hour12: false }),
+          anomalyDesc: status + (Number(payload.crowdLevel) >= 2 ? ' · 人流' + crowdText(payload.crowdLevel) : ''),
+          crowdAnomaly: Number(payload.crowdLevel) >= 2,
+          priorityReason: '',
+          userAction: null,
+          verifyDataList: [],
+          normalStreak: 0,
+          currentState: D3_STATE.OPEN,
+          recoverTime: null,
+          finalResult: null,
+          historyNotes: [],
+          reviewFlag: !!d2State[zone].review,
+          severity: STATUS_SEVERITY[status] !== undefined ? STATUS_SEVERITY[status] : 0, // 内部字段：当前异常严重度
+        };
+        // 创建时记录 D2 优先理由（若该区域为当前优先关注）
+        const winner = calcPriority();
+        if (winner && winner.zone === zone) ev.priorityReason = buildPriorityReason(winner);
+        d3Events[zone] = ev;
+      }
+
+      // 每条新报文驱动的 D3 状态转移（数据触发；按钮只能 OPEN→HANDLING）
+      function d3HandleMessage(zone, payload, status) {
+        try {
+          const ev = d3Events[zone];
+          const crowd = Number(payload.crowdLevel);
+          if (status !== '正常') {
+            if (ev) {
+              // 同一区域同时只存在 1 个活跃事件：短时间异常合并到同一事件
+              const sevNew = STATUS_SEVERITY[status] !== undefined ? STATUS_SEVERITY[status] : 0;
+              if (ev.currentState === D3_STATE.HANDLING && sevNew > ev.severity) {
+                // HANDLING → OPEN：新数据显示异常恶化，干预无效，允许回退
+                ev.currentState = D3_STATE.OPEN;
+                ev.normalStreak = 0;
+                ev.verifyDataList = [];
+                ev.severity = sevNew;
+                ev.historyNotes.push('[' + fmt(payload.time) + '] 异常恶化（' + status + '），干预无效，回退 OPEN');
+              } else if (ev.currentState === D3_STATE.HANDLING) {
+                // 异常改善但仍未恢复正常：保持 HANDLING，数据存入验证列表
+                ev.verifyDataList.push({ time: payload.time, pm25: payload.pm25, co2: payload.co2, crowdLevel: crowd });
+                if (ev.verifyDataList.length > 10) ev.verifyDataList.shift();
+                ev.normalStreak = 0; // 非正常报文，连续正常计数中断
+              }
+              if (crowd >= 2) ev.crowdAnomaly = true;
+              ev.anomalyDesc = status + (crowd >= 2 ? ' · 人流' + crowdText(payload.crowdLevel) : '');
+              ev.reviewFlag = ev.reviewFlag || !!d2State[zone].review;
+            } else {
+              d3CreateEvent(zone, payload, status);
+            }
+          } else if (ev && ev.currentState === D3_STATE.HANDLING) {
+            // HANDLING 收集验证数据；OPEN 收到正常数据保持 OPEN（禁止直接 RECOVERED）
+            ev.normalStreak += 1;
+            ev.verifyDataList.push({ time: payload.time, pm25: payload.pm25, co2: payload.co2, crowdLevel: crowd });
+            if (ev.verifyDataList.length > 10) ev.verifyDataList.shift();
+            const crowdOK = !ev.crowdAnomaly || crowd <= 1;
+            if (d2State[zone].review) {
+              // 置信度 < 0.2：标注需人工复核，事件保持 HANDLING，不触发恢复
+              ev.reviewFlag = true;
+            } else if (ev.normalStreak >= D3_RECOVER_STREAK && crowdOK) {
+              // HANDLING → RECOVERED：连续 2 次正常（人流事件还需 crowdLevel ≤ 1）
+              ev.currentState = D3_STATE.RECOVERED;
+              ev.recoverTime = payload.time || new Date().toLocaleString('zh-CN', { hour12: false });
+              ev.finalResult = '干预「' + ev.userAction + '」有效：连续 ' + ev.normalStreak +
+                ' 次正常报文' + (ev.crowdAnomaly ? ' 且人流等级 ≤1' : '') + '，事件恢复';
+              d3History.push(ev);
+              d3Events[zone] = null;
+            }
+          }
+        } catch (e) {
+          console.error('[AirGuard] D3 处理异常:', e);
+        }
+      }
+
+      // 迟到/重复报文：不回滚任何状态，仅补充事件历史记录
+      function d3AppendLateNote(zone, payload, label) {
+        const hist = d3History.filter(function (e) { return e.zoneId === zone; });
+        const target = d3Events[zone] || (hist.length ? hist[hist.length - 1] : null);
+        if (target) target.historyNotes.push(label + ' time=' + fmt(payload.time));
+      }
+
+      // OPEN → HANDLING：仅允许该转移（其余状态无效，状态保持）
+      function d3ApplyAction(zone, action) {
+        const ev = d3Events[zone];
+        if (!ev || ev.currentState !== D3_STATE.OPEN) return;
+        ev.currentState = D3_STATE.HANDLING;
+        ev.userAction = action;
+        ev.normalStreak = 0;
+        ev.verifyDataList = [];
+        renderAll();
+      }
+
+      // 按钮人工干预：本页生效 + 通过 MQTT 广播，三端同步进入 HANDLING
+      function d3Intervene(zone, action) {
+        d3ApplyAction(zone, action);
+        client.publish('airguard/' + zone + '/action', JSON.stringify({
+          zoneId: zone,
+          action: action,
+          time: new Date().toLocaleString('zh-CN', { hour12: false }),
+        }));
+      }
+
+      // 收到干预指令（来自其他页面/设备）：同步执行 OPEN → HANDLING
+      function onActionMessage(topic, payload) {
+        const zone = (payload && payload.zoneId) || topic.split('/')[1] || '';
+        if (!Object.prototype.hasOwnProperty.call(ZONES, zone)) return;
+        d3ApplyAction(zone, payload.action || '—');
+      }
+
+      function renderD3() {
+        try {
+          const actives = ZONE_IDS.map(function (z) { return d3Events[z]; }).filter(Boolean);
+          if (actives.length === 0) {
+            $d3Active.innerHTML = '<p class="d3-empty">当前无待处理事件，各区域状态正常</p>';
+          } else {
+            $d3Active.innerHTML = actives.map(function (ev) {
+              const isOpen = ev.currentState === D3_STATE.OPEN;
+              let body;
+              if (isOpen) {
+                body = '<div class="d3-actions">' + D3_ACTIONS.map(function (a) {
+                  return '<button class="d3-btn" data-zone="' + ev.zoneId + '" data-action="' + a + '">干预：' + a + '</button>';
+                }).join('') + '</div>';
+              } else {
+                body = '<div class="d3-desc">处置：' + ev.userAction +
+                  '；验证：连续正常 ' + ev.normalStreak + '/' + D3_RECOVER_STREAK +
+                  (ev.crowdAnomaly ? '（还需人流 ≤1）' : '') +
+                  (ev.reviewFlag ? '；<span class="d3-review">人流数据置信度低于阈值，需人工复核</span>' : '') +
+                  '</div>';
+              }
+              return '<div class="d3-event">' +
+                '<div class="d3-ev-head">' +
+                '<span class="d3-badge ' + (isOpen ? 'open' : 'handling') + '">' +
+                (isOpen ? 'OPEN 待处理' : 'HANDLING 处理中') + '</span>' +
+                '<b>' + ZONES[ev.zoneId].name + '</b>' +
+                '<span class="zone-id">' + ev.zoneId + ' · ' + ev.event_id + '</span>' +
+                '<span class="zone-id">开始于 ' + ev.startTime + '</span>' +
+                '</div>' +
+                '<div class="d3-desc">异常：' + ev.anomalyDesc +
+                (ev.priorityReason ? '；优先理由：' + ev.priorityReason : '') + '</div>' +
+                body +
+                '</div>';
+            }).join('');
+          }
+
+          if (d3History.length === 0) {
+            $d3History.innerHTML = '<p class="d3-empty">暂无已恢复事件</p>';
+          } else {
+            $d3History.innerHTML = d3History.slice().reverse().map(function (ev) {
+              return '<div class="d3-h-item">[' + ev.event_id + '] ' + ZONES[ev.zoneId].name +
+                '（' + ev.zoneId + '）· 处置「' + ev.userAction + '」· 恢复于 ' + ev.recoverTime +
+                '<br>' + ev.finalResult +
+                (ev.historyNotes.length ? '<br>补充记录：' + ev.historyNotes.slice(-3).join('；') : '') +
+                '</div>';
+            }).join('');
+          }
+        } catch (e) {
+          console.error('[AirGuard] D3 渲染异常:', e);
+        }
+      }
+
+      // D3 干预按钮（事件委托）
+      $d3Active.addEventListener('click', function (e) {
+        const btn = e.target && e.target.closest ? e.target.closest('.d3-btn') : null;
+        if (!btn) return;
+        d3Intervene(btn.getAttribute('data-zone'), btn.getAttribute('data-action'));
+      });
 
       // E1 预览面板按钮：跳转独立 3D 数字孪生页面（three-min.html）
       document.getElementById('btn-open3d').addEventListener('click', function () {
@@ -644,6 +895,9 @@
         setConn('on');
         client.subscribe(TOPIC, function (err) {
           if (err) console.error('[AirGuard] 订阅失败:', err);
+        });
+        client.subscribe(ACTION_TOPIC, function (err) {
+          if (err) console.error('[AirGuard] action 订阅失败:', err);
         });
       });
       client.on('close', function () { setConn('off'); });
@@ -660,7 +914,9 @@
           if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
             throw new Error('payload 不是对象');
           }
-          onEnvMessage(topic, payload);
+          // 按主题分流：/action 干预指令；其余按环境报文处理
+          if (topic.indexOf('/action') > -1) onActionMessage(topic, payload);
+          else onEnvMessage(topic, payload);
         } catch (e) {
           // 错误 JSON 报文不崩溃页面，仅控制台输出错误
           console.error('[AirGuard] 消息解析失败:', e);

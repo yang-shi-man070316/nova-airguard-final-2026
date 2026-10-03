@@ -121,6 +121,37 @@
     #d2-priority .d2-none { color: var(--muted); font-weight: 400; }
     #d2-reason { font-size: 12px; color: var(--muted); line-height: 1.6; }
 
+    /* ===== D3 事件状态（左侧面板 + 点击建筑弹窗） ===== */
+    .tag {
+      font-size: 11px;
+      color: #475569;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      padding: 1px 6px;
+      margin-left: 8px;
+      vertical-align: 2px;
+    }
+    #d3-panel { display: grid; gap: 6px; margin-top: 4px; }
+    .d3-line { font-size: 12px; color: var(--muted); padding: 4px 8px; border-radius: 6px; background: #f8fafc; }
+    .d3-line.open { color: #374151; border: 1px solid #e5e7eb; background: #ffffff; }
+    .d3-line.handling { color: #b45309; background: #fff7e6; border: 1px solid #fcd34d; }
+    .d3-line.ok { color: #2e7d32; background: #e8f5e9; }
+    .d3-info {
+      position: absolute;
+      left: 12px;
+      top: 12px;
+      z-index: 4;
+      max-width: 280px;
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 12px;
+      line-height: 1.7;
+      color: var(--text);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+    }
+
     .canvas-wrap {
       flex: 1;
       min-width: 0;
@@ -178,10 +209,16 @@
       <h2 class="d2-title">D2 优先关注<span class="tag">D2</span></h2>
       <div id="d2-priority"></div>
       <div id="d2-reason"></div>
+
+      <!-- D3 干预—验证—恢复：OPEN 白框 / HANDLING 橙色闪烁 / RECOVERED 恢复原色 -->
+      <h2 class="d2-title">D3 事件状态<span class="tag">D3</span></h2>
+      <div id="d3-panel"></div>
     </aside>
     <section class="canvas-wrap" id="canvas-wrap">
       <div id="three-fallback" class="placeholder" style="display:none">Three.js CDN 加载失败，请检查网络后刷新</div>
-      <div class="op-hint">拖拽旋转 · 滚轮缩放</div>
+      <div class="op-hint">拖拽旋转 · 滚轮缩放 · 点击建筑查看事件</div>
+      <!-- 点击建筑后显示该区域 D3 事件详情 -->
+      <div id="d3-info" class="d3-info" style="display:none"></div>
     </section>
   </main>
 
@@ -192,6 +229,8 @@
       // ============ MQTT / 数据契约配置 ============
       const MQTT_URL = 'ws://127.0.0.1:8083/mqtt';
       const TOPIC = 'airguard/+/env';
+      // D3 干预指令主题：总视图点击干预后广播，本页同步进入 HANDLING
+      const ACTION_TOPIC = 'airguard/+/action';
 
       const ZONES = {
         'zone-n': { name: '宿舍区' },
@@ -258,6 +297,18 @@
         return acc;
       }, {});
 
+      // ============ D3 干预—验证—恢复状态机 ============
+      // 状态转移硬编码（禁止非法跳转）：
+      //   无事件 --新异常--> OPEN --点击干预(人工)--> HANDLING --数据满足恢复条件--> RECOVERED
+      //   HANDLING --新数据显示异常仍在--> OPEN（干预无效，允许回退）
+      //   禁止：OPEN 直接到 RECOVERED；已 RECOVERED 事件迟到/重复消息不回滚（仅补充历史记录）
+      const D3_STATE = { OPEN: 'OPEN', HANDLING: 'HANDLING', RECOVERED: 'RECOVERED' };
+      const D3_RECOVER_STREAK = 2; // 连续正常报文次数阈值
+
+      const d3Events = {};        // zone → 活跃事件（OPEN / HANDLING）；RECOVERED 后置 null
+      const d3History = [];       // 已恢复事件历史（RECOVERED）
+      const zoneLastMsgTime = {}; // zone → 最近报文 time（重复/乱序判断）
+
       // ============ DOM ============
       const $conn = document.getElementById('conn');
       const $connText = document.getElementById('conn-text');
@@ -303,6 +354,9 @@
       const heatSpots = {}; // zone → 地面风险热力光斑（径向渐变 Canvas 贴图）
       const labels = {};    // zone → 文字标签
       const highlightShells = {}; // zone → D2 优先关注高亮壳（轻微闪烁标记重点区域）
+      const d3Shells = {};        // zone → D3 状态标记壳（OPEN 白框 / HANDLING 橙闪 / RECOVERED 隐藏）
+      const d3ShellState = {};    // zone → null | 'OPEN' | 'HANDLING'
+      let d3InfoTimer = null;
       let priorityZone = null;    // 当前优先关注区域
       const SHELL_SIZES = {
         'zone-n': [7.2, 5.8, 10.4],  // 宿舍区包围盒
@@ -422,6 +476,16 @@
           shell.position.set(POS[z], SHELL_SIZES[z][1] / 2, 0);
           scene.add(shell);
           highlightShells[z] = shell;
+
+          // D3 状态标记壳（略大于 D2 壳）：OPEN 白框 / HANDLING 橙闪 / RECOVERED 恢复原色（隐藏）
+          const d3Shell = new THREE.Mesh(
+            new THREE.BoxGeometry(SHELL_SIZES[z][0] * 1.05, SHELL_SIZES[z][1] * 1.05, SHELL_SIZES[z][2] * 1.05),
+            new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthWrite: false })
+          );
+          d3Shell.position.set(POS[z], SHELL_SIZES[z][1] / 2, 0);
+          scene.add(d3Shell);
+          d3Shells[z] = d3Shell;
+          d3ShellState[z] = null;
         });
 
         // 自定义简单控制器：拖拽旋转 + 滚轮缩放
@@ -442,9 +506,26 @@
           lastY = e.clientY;
         });
         el.addEventListener('pointerup', function (e) {
+          const wasDrag = Math.abs(e.clientX - lastX) > 5 || Math.abs(e.clientY - lastY) > 5;
           dragging = false;
           el.style.cursor = 'grab';
           el.releasePointerCapture(e.pointerId);
+          if (wasDrag) return;
+          // 点击（非拖拽）：拾取建筑，查看该区域 D3 事件
+          const rect = el.getBoundingClientRect();
+          const rayMouse = new THREE.Vector2(
+            ((e.clientX - rect.left) / rect.width) * 2 - 1,
+            -((e.clientY - rect.top) / rect.height) * 2 + 1
+          );
+          const ray = new THREE.Raycaster();
+          ray.setFromCamera(rayMouse, camera);
+          for (let i = 0; i < ZONE_IDS.length; i++) {
+            const z = ZONE_IDS[i];
+            if (ray.intersectObject(buildings[z].group, true).length > 0) {
+              d3ShowEventInfo(z);
+              return;
+            }
+          }
         });
         el.addEventListener('wheel', function (e) {
           e.preventDefault();
@@ -743,6 +824,160 @@
         priorityZone = winner ? winner.zone : null;
       }
 
+      // ============ D3：事件创建 / 状态转移 / 渲染 ============
+      function d3CreateEvent(zone, payload, status) {
+        const ev = {
+          event_id: 'EVT-' + zone + '-' + Date.now(),
+          zoneId: zone,
+          startTime: payload.time || new Date().toLocaleString('zh-CN', { hour12: false }),
+          anomalyDesc: status + (Number(payload.crowdLevel) >= 2 ? ' · 人流' + crowdText(payload.crowdLevel) : ''),
+          crowdAnomaly: Number(payload.crowdLevel) >= 2,
+          priorityReason: '',
+          userAction: null,
+          verifyDataList: [],
+          normalStreak: 0,
+          currentState: D3_STATE.OPEN,
+          recoverTime: null,
+          finalResult: null,
+          historyNotes: [],
+          reviewFlag: !!d2State[zone].review,
+          severity: STATUS_SEVERITY[status] !== undefined ? STATUS_SEVERITY[status] : 0, // 内部字段：当前异常严重度
+        };
+        const winner = calcPriority();
+        if (winner && winner.zone === zone) ev.priorityReason = buildPriorityReason(winner);
+        d3Events[zone] = ev;
+      }
+
+      // 每条新报文驱动的 D3 状态转移（数据触发；按钮只能 OPEN→HANDLING）
+      function d3HandleMessage(zone, payload, status) {
+        try {
+          const ev = d3Events[zone];
+          const crowd = Number(payload.crowdLevel);
+          if (status !== '正常') {
+            if (ev) {
+              // 同一区域同时只存在 1 个活跃事件：短时间异常合并到同一事件
+              const sevNew = STATUS_SEVERITY[status] !== undefined ? STATUS_SEVERITY[status] : 0;
+              if (ev.currentState === D3_STATE.HANDLING && sevNew > ev.severity) {
+                // HANDLING → OPEN：新数据显示异常恶化，干预无效，允许回退
+                ev.currentState = D3_STATE.OPEN;
+                ev.normalStreak = 0;
+                ev.verifyDataList = [];
+                ev.severity = sevNew;
+                ev.historyNotes.push('[' + fmt(payload.time) + '] 异常恶化（' + status + '），干预无效，回退 OPEN');
+              } else if (ev.currentState === D3_STATE.HANDLING) {
+                // 异常改善但仍未恢复正常：保持 HANDLING，数据存入验证列表
+                ev.verifyDataList.push({ time: payload.time, pm25: payload.pm25, co2: payload.co2, crowdLevel: crowd });
+                if (ev.verifyDataList.length > 10) ev.verifyDataList.shift();
+                ev.normalStreak = 0; // 非正常报文，连续正常计数中断
+              }
+              if (crowd >= 2) ev.crowdAnomaly = true;
+              ev.anomalyDesc = status + (crowd >= 2 ? ' · 人流' + crowdText(payload.crowdLevel) : '');
+              ev.reviewFlag = ev.reviewFlag || !!d2State[zone].review;
+            } else {
+              d3CreateEvent(zone, payload, status);
+            }
+          } else if (ev && ev.currentState === D3_STATE.HANDLING) {
+            // HANDLING 收集验证数据；OPEN 收到正常数据保持 OPEN（禁止直接 RECOVERED）
+            ev.normalStreak += 1;
+            ev.verifyDataList.push({ time: payload.time, pm25: payload.pm25, co2: payload.co2, crowdLevel: crowd });
+            if (ev.verifyDataList.length > 10) ev.verifyDataList.shift();
+            const crowdOK = !ev.crowdAnomaly || crowd <= 1;
+            if (d2State[zone].review) {
+              // 置信度 < 0.2：标注需人工复核，事件保持 HANDLING，不触发恢复
+              ev.reviewFlag = true;
+            } else if (ev.normalStreak >= D3_RECOVER_STREAK && crowdOK) {
+              // HANDLING → RECOVERED：连续 2 次正常（人流事件还需 crowdLevel ≤ 1）
+              ev.currentState = D3_STATE.RECOVERED;
+              ev.recoverTime = payload.time || new Date().toLocaleString('zh-CN', { hour12: false });
+              ev.finalResult = '干预「' + ev.userAction + '」有效：连续 ' + ev.normalStreak +
+                ' 次正常报文' + (ev.crowdAnomaly ? ' 且人流等级 ≤1' : '') + '，事件恢复';
+              d3History.push(ev);
+              d3Events[zone] = null;
+            }
+          }
+        } catch (e) {
+          console.error('[AirGuard] D3 处理异常:', e);
+        }
+      }
+
+      // 迟到/重复报文：不回滚任何状态，仅补充事件历史记录
+      function d3AppendLateNote(zone, payload, label) {
+        const hist = d3History.filter(function (e) { return e.zoneId === zone; });
+        const target = d3Events[zone] || (hist.length ? hist[hist.length - 1] : null);
+        if (target) target.historyNotes.push(label + ' time=' + fmt(payload.time));
+      }
+
+      // OPEN → HANDLING：仅允许该转移（其余状态无效，状态保持）；本页无干预按钮，由指令驱动
+      function d3ApplyAction(zone, action) {
+        const ev = d3Events[zone];
+        if (!ev || ev.currentState !== D3_STATE.OPEN) return;
+        ev.currentState = D3_STATE.HANDLING;
+        ev.userAction = action;
+        ev.normalStreak = 0;
+        ev.verifyDataList = [];
+        renderD3Panel();
+        renderD2Panel();
+      }
+
+      // 收到干预指令（总视图点击干预后经 MQTT 广播）：同步执行 OPEN → HANDLING
+      function onActionMessage(topic, payload) {
+        const zone = (payload && payload.zoneId) || topic.split('/')[1] || '';
+        if (!Object.prototype.hasOwnProperty.call(ZONES, zone)) return;
+        d3ApplyAction(zone, payload.action || '—');
+      }
+
+      // 左侧面板 D3 事件状态 + 3D 标记壳状态（OPEN 白框 / HANDLING 橙闪 / 其余隐藏）
+      function renderD3Panel() {
+        const $d3Panel = document.getElementById('d3-panel');
+        $d3Panel.innerHTML = ZONE_IDS.map(function (z) {
+          const ev = d3Events[z];
+          if (!ev) {
+            d3ShellState[z] = null;
+            const hist = d3History.filter(function (e) { return e.zoneId === z; });
+            const last = hist.length ? hist[hist.length - 1] : null;
+            if (last) {
+              return '<div class="d3-line ok">' + ZONES[z].name + '：已恢复（' + (last.userAction || '—') + '）</div>';
+            }
+            return '<div class="d3-line">' + ZONES[z].name + '：无事件</div>';
+          }
+          if (ev.currentState === D3_STATE.OPEN) {
+            d3ShellState[z] = D3_STATE.OPEN;
+            return '<div class="d3-line open">' + ZONES[z].name + '：OPEN 待处理（等待干预）</div>';
+          }
+          d3ShellState[z] = D3_STATE.HANDLING;
+          return '<div class="d3-line handling">' + ZONES[z].name + '：HANDLING 处理中 · 连续正常 ' +
+            ev.normalStreak + '/' + D3_RECOVER_STREAK +
+            (ev.reviewFlag ? ' · 需人工复核' : '') + '</div>';
+        }).join('');
+      }
+
+      // 点击建筑：弹出该区域 D3 事件详情（8 秒后自动关闭）
+      function d3ShowEventInfo(zone) {
+        const ev = d3Events[zone];
+        const hist = d3History.filter(function (e) { return e.zoneId === zone; });
+        const last = hist.length ? hist[hist.length - 1] : null;
+        let html;
+        if (ev) {
+          const stText = ev.currentState === D3_STATE.OPEN ? 'OPEN 待处理' : 'HANDLING 处理中';
+          html = '<b>' + ZONES[zone].name + '（' + zone + '）</b> ' + stText +
+            '<br>事件：' + ev.event_id +
+            '<br>异常：' + ev.anomalyDesc +
+            (ev.currentState === D3_STATE.HANDLING
+              ? '<br>处置：' + (ev.userAction || '—') + ' · 连续正常 ' + ev.normalStreak + '/' + D3_RECOVER_STREAK +
+                (ev.reviewFlag ? ' · 需人工复核' : '')
+              : '<br>等待人工干预（干预按钮在总视图 D3 面板）');
+        } else if (last) {
+          html = '<b>' + ZONES[zone].name + '（' + zone + '）</b> RECOVERED 已恢复<br>' + (last.finalResult || '');
+        } else {
+          html = '<b>' + ZONES[zone].name + '（' + zone + '）</b> 无事件，状态正常';
+        }
+        const $d3Info = document.getElementById('d3-info');
+        $d3Info.innerHTML = html;
+        $d3Info.style.display = 'block';
+        clearTimeout(d3InfoTimer);
+        d3InfoTimer = setTimeout(function () { $d3Info.style.display = 'none'; }, 8000);
+      }
+
       // ============ 钟盘纹理（教学区钟楼） ============
       function makeClockTexture() {
         const canvas = document.createElement('canvas');
@@ -923,6 +1158,21 @@
             shell.material.opacity = 0;
           }
         });
+        // D3 状态标记壳：OPEN 白框静止 / HANDLING 橙色闪烁 / RECOVERED 恢复原色（隐藏）
+        ZONE_IDS.forEach(function (z) {
+          const shell = d3Shells[z];
+          if (!shell) return;
+          const st = d3ShellState[z];
+          if (st === D3_STATE.OPEN) {
+            shell.material.color.set(0xffffff);
+            shell.material.opacity = 0.55;
+          } else if (st === D3_STATE.HANDLING) {
+            shell.material.color.set(0xff9800);
+            shell.material.opacity = 0.35 + 0.3 * (0.5 + 0.5 * Math.sin(performance.now() * 0.005));
+          } else {
+            shell.material.opacity = 0;
+          }
+        });
         camera.position.set(
           TARGET.x + radius * Math.sin(phi) * Math.sin(theta),
           TARGET.y + radius * Math.cos(phi),
@@ -969,6 +1219,23 @@
           console.warn('[AirGuard] 未知区域消息，已忽略:', topic);
           return;
         }
+        // ===== 消息健壮性：zoneId+time 去重；乱序旧消息不覆盖新状态（迟到仅补充历史） =====
+        const msgTime = payload.time;
+        const lastTime = zoneLastMsgTime[zone];
+        if (msgTime && lastTime) {
+          if (msgTime === lastTime) {
+            console.log('[AirGuard] 重复消息已忽略:', zone, msgTime);
+            d3AppendLateNote(zone, payload, '重复报文');
+            return;
+          }
+          if (msgTime < lastTime) {
+            console.log('[AirGuard] 迟到消息，仅补充历史记录:', zone, msgTime);
+            d3AppendLateNote(zone, payload, '迟到报文');
+            return;
+          }
+        }
+        zoneLastMsgTime[zone] = msgTime || lastTime;
+
         const status = calcStatus(payload.pm25, payload.co2);
         // 只更新对应 zone，绝不写入其他区域
         zoneState[zone] = {
@@ -986,8 +1253,11 @@
         };
         // D2：更新连续异常计数与风险总分，刷新面板与 3D 闪烁标记
         updateD2(zone, status, payload.crowdLevel, payload.crowdSource, payload.crowdConfidence);
+        // D3：驱动状态机（数据触发；OPEN→HANDLING 仅由按钮人工触发）
+        d3HandleMessage(zone, payload, status);
         renderPanel();
         renderD2Panel();
+        renderD3Panel();
         updateD2Markers();
         updateScene();
       }
@@ -999,6 +1269,9 @@
         setConn('on');
         client.subscribe(TOPIC, function (err) {
           if (err) console.error('[AirGuard] 订阅失败:', err);
+        });
+        client.subscribe(ACTION_TOPIC, function (err) {
+          if (err) console.error('[AirGuard] action 订阅失败:', err);
         });
       });
       client.on('close', function () { setConn('off'); });
@@ -1014,7 +1287,9 @@
           if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
             throw new Error('payload 不是对象');
           }
-          onEnvMessage(topic, payload);
+          // 按主题分流：/action 干预指令；其余按环境报文处理
+          if (topic.indexOf('/action') > -1) onActionMessage(topic, payload);
+          else onEnvMessage(topic, payload);
         } catch (e) {
           // 错误 JSON 不崩溃页面，仅控制台输出
           console.error('[AirGuard] 消息解析失败:', e);
@@ -1035,6 +1310,7 @@
 
       renderPanel(); // 初始：三区域均为「暂无实时数据」，建筑墙体灰色
       renderD2Panel(); // 初始：无优先关注区域
+      renderD3Panel(); // 初始：三区域均无事件
     })();
   </script>
 </body>
