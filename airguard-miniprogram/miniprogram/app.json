@@ -1,0 +1,13 @@
+{
+  "pages": [
+    "pages/index/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "AirGuard 环境监测",
+    "navigationBarBackgroundColor": "#1e3a5f",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#f5f7fa",
+    "backgroundTextStyle": "light"
+  },
+  "sitemapLocation": "sitemap.json"
+}

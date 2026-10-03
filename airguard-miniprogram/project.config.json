@@ -1,0 +1,20 @@
+{
+  "description": "AirGuard 环境监测小程序",
+  "projectname": "airguard",
+  "miniprogramRoot": "miniprogram/",
+  "compileType": "miniprogram",
+  "appid": "touristappid",
+  "libVersion": "2.32.3",
+  "setting": {
+    "es6": true,
+    "urlCheck": false,
+    "minified": false,
+    "postcss": true,
+    "babelSetting": {
+      "ignore": [],
+      "disablePlugins": [],
+      "outputPath": ""
+    }
+  },
+  "condition": {}
+}

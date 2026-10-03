@@ -1,0 +1,65 @@
+/* AirGuard 环境监测 · 首页样式：浅色卡片布局 */
+
+.container {
+  padding: 24rpx;
+}
+
+/* ===== MQTT 连接状态栏 ===== */
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 14rpx;
+  background: #ffffff;
+  padding: 20rpx 24rpx;
+  border-radius: 16rpx;
+  margin-bottom: 24rpx;
+  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.03);
+}
+.status-dot {
+  width: 18rpx;
+  height: 18rpx;
+  border-radius: 50%;
+  background: #9ca3af;
+}
+.status-dot.ok { background: #22c55e; }
+.status-dot.err { background: #ef4444; }
+.status-text { font-size: 26rpx; color: #4b5563; }
+
+/* ===== 区域卡片 ===== */
+.card {
+  background: #ffffff;
+  border-radius: 16rpx;
+  padding: 24rpx;
+  margin-bottom: 24rpx;
+  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.03);
+}
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+  margin-bottom: 16rpx;
+}
+.card-title { font-size: 32rpx; font-weight: 600; }
+.zone-id { font-size: 22rpx; color: #9ca3af; font-family: monospace; }
+.tag {
+  margin-left: auto;
+  color: #ffffff;
+  padding: 4rpx 20rpx;
+  border-radius: 999rpx;
+  font-size: 24rpx;
+}
+.tag.green { background: #22c55e; }
+.tag.orange { background: #f59e0b; }
+.tag.red { background: #ef4444; }
+.tag.gray { background: #9ca3af; }
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10rpx 0;
+  border-bottom: 1rpx dashed #eef0f3;
+}
+.row:last-child { border-bottom: none; }
+.label { font-size: 26rpx; color: #6b7280; }
+.value { font-size: 28rpx; color: #1f2937; font-weight: 600; }

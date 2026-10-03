@@ -1,0 +1,33 @@
+<!-- AirGuard 环境监测 · 首页 -->
+<view class="container">
+  <!-- MQTT 连接状态栏 -->
+  <view class="status-bar">
+    <view class="status-dot {{connClass}}"></view>
+    <text class="status-text">MQTT：{{connText}}</text>
+  </view>
+
+  <!-- 三个区域卡片 -->
+  <view class="card" wx:for="{{zoneList}}" wx:key="zoneid">
+    <view class="card-head">
+      <text class="card-title">{{item.zoneName}}</text>
+      <text class="zone-id">{{item.zoneid}}</text>
+      <text class="tag {{item.tagClass}}">{{item.statusText}}</text>
+    </view>
+    <view class="row">
+      <text class="label">PM2.5</text>
+      <text class="value">{{item.pm25}} μg/m³</text>
+    </view>
+    <view class="row">
+      <text class="label">CO₂</text>
+      <text class="value">{{item.co2}} ppm</text>
+    </view>
+    <view class="row">
+      <text class="label">人流密度</text>
+      <text class="value">{{item.crowdText}}</text>
+    </view>
+    <view class="row">
+      <text class="label">更新时间</text>
+      <text class="value">{{item.time}}</text>
+    </view>
+  </view>
+</view>

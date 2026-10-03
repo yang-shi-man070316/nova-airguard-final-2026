@@ -1,0 +1,6 @@
+/* 全局样式：浅色背景 */
+page {
+  background-color: #f5f7fa;
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #1f2937;
+}
