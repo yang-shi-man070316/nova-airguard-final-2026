@@ -1995,6 +1995,105 @@
       renderE2(); // E2 初始渲染
       setInterval(function () { renderE2Status(); }, 1000); // 离线标志由 D4 巡检维护，此处轻量跟随
 
+      // ============ E3 Web—小程序 实时同步与协同 ============
+      // 新增接入，不修改原有代码：以函数包装（calcPriority / buildPriorityReason）
+      // 与独立 MQTT 订阅（airguard/e3/#）实现，原有 D1-D5 处理链与订阅不变。
+      // 协议：airguard/e3/focus {zoneId} 小程序切换重点区域（zoneId 为空恢复规则判定）；
+      //      airguard/e3/event {zoneId, op:'recovered'|'handling'} 小程序标记事件状态。
+      let e3FocusZone = null; // 小程序人工指定重点区域（null = 按 D2 规则计算）
+
+      // 包装优先级计算：小程序指定重点区域时优先于规则结果（原函数体不修改）
+      const __e3CalcPriority = calcPriority;
+      calcPriority = function () {
+        if (e3FocusZone) {
+          const z = e3FocusZone;
+          const d = zoneState[z];
+          return {
+            zone: z,
+            status: d ? d.status : '—',
+            crowdLevel: d ? d.crowdLevel : null,
+            anomalyCount: d2State[z].anomalyCount,
+            score: d2State[z].score,
+            review: d2State[z].review,
+            abnormal: true,      // 人工指定优先于规则计算结果
+            e3Assigned: true,
+          };
+        }
+        return __e3CalcPriority();
+      };
+
+      // 包装判定理由：人工指定时给出可解释的跨端协同说明
+      const __e3BuildReason = buildPriorityReason;
+      buildPriorityReason = function (winner) {
+        if (winner && winner.e3Assigned) return '小程序巡检端人工指定重点区域（跨端协同同步）';
+        return __e3BuildReason(winner);
+      };
+
+      // D2 面板头部注入「小程序指定」徽标（JS 注入，不改动 HTML 结构）
+      function e3RenderBadge() {
+        let badge = document.getElementById('e3-focus-badge');
+        if (!e3FocusZone) {
+          if (badge) badge.style.display = 'none';
+          return;
+        }
+        if (!badge) {
+          badge = document.createElement('span');
+          badge.id = 'e3-focus-badge';
+          badge.style.cssText = 'font-size:12px;color:#2563eb;border:1px solid #93c5fd;' +
+            'background:#eff6ff;border-radius:999px;padding:3px 12px;white-space:nowrap;';
+          const head = document.querySelector('#panel-d2 .panel-head');
+          if (head) head.appendChild(badge);
+        }
+        badge.style.display = '';
+        badge.textContent = '📱 小程序指定重点区域：' + ZONES[e3FocusZone].name + '（' + e3FocusZone + '）';
+      }
+
+      // E3 独立订阅：与主 client 的订阅互不干扰，仅处理跨端指令
+      const e3Client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000 });
+      e3Client.on('connect', function () {
+        e3Client.subscribe('airguard/e3/focus');
+        e3Client.subscribe('airguard/e3/event');
+      });
+      e3Client.on('message', function (topic, message) {
+        try {
+          const p = JSON.parse(new TextDecoder().decode(message));
+          if (!p || typeof p !== 'object' || Array.isArray(p)) return;
+          if (topic.indexOf('airguard/e3/focus') === 0) {
+            // 小程序切换重点关注区域：Web 优先关注面板 / 概览 / 表格同步更新
+            const z = p.zoneId;
+            e3FocusZone = Object.prototype.hasOwnProperty.call(ZONES, z) ? z : null;
+            renderD2();
+            e3RenderBadge();
+            console.log('[AirGuard][E3] 重点区域指令:', z || '（恢复规则判定）');
+          } else if (topic.indexOf('airguard/e3/event') === 0) {
+            const z = p.zoneId;
+            if (!Object.prototype.hasOwnProperty.call(ZONES, z)) return;
+            if (p.op === 'recovered') {
+              // 小程序标记已恢复：事件归档 RECOVERED（跨端状态一致）
+              const ev = d3Events[z];
+              if (ev) {
+                ev.currentState = D3_STATE.RECOVERED;
+                ev.recoverTime = p.time || new Date().toLocaleString('zh-CN', { hour12: false });
+                ev.finalResult = '小程序巡检端标记已恢复' +
+                  (p.note ? '（' + p.note + '）' : '') + '：跨端事件同步';
+                ev.historyNotes.push('[小程序] ' + (p.time || '') + ' 标记事件已恢复');
+                d3History.push(ev);
+                d3Events[z] = null;
+              }
+              renderAll();
+              console.log('[AirGuard][E3] 事件已恢复指令:', z);
+            } else if (p.op === 'handling') {
+              d3ApplyAction(z, p.note || '小程序标记处理中');
+              renderAll();
+              console.log('[AirGuard][E3] 事件处理中指令:', z);
+            }
+          }
+        } catch (e) {
+          console.error('[AirGuard][E3] 指令解析失败:', e);
+        }
+      });
+      e3RenderBadge();
+
       renderAll(); // 初始渲染：所有模块显示等待状态
     })();
   </script>

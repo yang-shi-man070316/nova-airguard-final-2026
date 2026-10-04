@@ -1,0 +1,77 @@
+<!-- AirGuard E3 巡检协同页：精简巡检视图，与 Web 监测台 / 3D 孪生数据同源 -->
+<view class="container">
+  <!-- 顶部状态横幅（与首页同风格） -->
+  <view class="hero">
+    <view class="hero-title-row">
+      <text class="hero-logo">📱</text>
+      <text class="hero-title">AirGuard 巡检协同</text>
+    </view>
+    <view class="hero-desc">E3 · Web—小程序实时同步 · 现场巡检端</view>
+    <view class="hero-divider"></view>
+    <view class="hero-row">
+      <view class="status-dot {{connClass}}"></view>
+      <text class="hero-status">{{connText}}</text>
+      <text class="hero-online">{{onlineText}}</text>
+    </view>
+  </view>
+
+  <view class="section-title">重点关注区域（切换后 Web / 3D 同步更新）</view>
+  <view class="zone-tabs">
+    <view
+      wx:for="{{zones}}"
+      wx:key="zoneid"
+      class="zone-tab {{selected === item.zoneid ? 'active' : ''}}"
+      data-zone="{{item.zoneid}}"
+      bindtap="onSelectZone"
+    >{{item.zoneName}}</view>
+  </view>
+
+  <!-- 重点区域卡片 -->
+  <view class="card" style="border-left-color: {{focus.accent}};">
+    <view class="card-head">
+      <text class="card-title">{{focus.zoneName}}</text>
+      <text class="zone-id">{{focus.zoneid}}</text>
+      <text class="tag" style="background: {{focus.accent}};">{{focus.statusText}}</text>
+    </view>
+    <view class="metrics">
+      <view class="metric">
+        <text class="m-label">PM2.5</text>
+        <text class="m-value">{{focus.pm25}}<text class="m-unit"> μg/m³</text></text>
+      </view>
+      <view class="metric">
+        <text class="m-label">CO₂</text>
+        <text class="m-value">{{focus.co2}}<text class="m-unit"> ppm</text></text>
+      </view>
+      <view class="metric">
+        <text class="m-label">人流密度</text>
+        <text class="m-value">{{focus.crowdText}}<text class="m-unit"> L{{focus.crowdLevel}}</text></text>
+      </view>
+      <view class="metric">
+        <text class="m-label">上报时间</text>
+        <text class="m-value m-time">{{focus.time}}</text>
+      </view>
+    </view>
+    <view class="d5-line {{focus.mismatch ? 'conflict' : ''}}">
+      D5 判定：规则{{focus.ruleText}} ｜ ML {{focus.mlText}}{{focus.mismatch ? ' ｜ ⚠不一致' : ''}}
+    </view>
+    <view class="node-line">
+      节点：{{focus.online ? '在线' : '离线'}} · lastSeen {{focus.lastSeen}} · 事件：{{focus.eventDesc}}
+    </view>
+    <view class="btn-row">
+      <button class="op-btn handle" size="mini" disabled="{{focus.eventState !== 'OPEN'}}" bindtap="onMarkHandling">标记处理中</button>
+      <button class="op-btn recover" size="mini" disabled="{{focus.eventState !== 'HANDLING'}}" bindtap="onMarkRecovered">标记已恢复</button>
+    </view>
+    <view class="clear-focus" bindtap="onClearFocus">恢复规则判定重点区域</view>
+  </view>
+
+  <view class="section-title">最近事件（与 Web / 3D 同源）</view>
+  <view class="card ev-card">
+    <view wx:for="{{events}}" wx:key="key" class="ev-item">
+      <text class="chip {{item.cls}}">{{item.chip}}</text>
+      <text class="ev-text">{{item.text}}</text>
+    </view>
+    <view wx:if="{{events.length === 0}}" class="ev-empty">暂无事件记录</view>
+  </view>
+
+  <view class="footer">数据来源：同一 MQTT Broker · 与 Web 监测台数据同源 · 状态同一套规则生成</view>
+</view>

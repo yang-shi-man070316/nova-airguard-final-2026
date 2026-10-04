@@ -167,3 +167,16 @@
   color: #b0b8c4;
   padding-top: 8rpx;
 }
+
+/* ===== E3 巡检协同入口 ===== */
+.e3-entry {
+  margin-top: 8rpx;
+  text-align: center;
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 2rpx solid #bfdbfe;
+  border-radius: 999rpx;
+  padding: 18rpx 0;
+}

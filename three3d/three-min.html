@@ -1819,6 +1819,81 @@
         if (e.target && e.target.id === 'btn-focus-reset') resetCameraFocus();
       });
 
+      // ============ E3 Web—小程序 实时同步与协同 ============
+      // 新增接入，不修改原有代码：函数包装（calcPriority / buildPriorityReason）
+      // + 独立 MQTT 订阅（airguard/e3/#）。小程序切换重点区域时，
+      // 3D 页面的 D2 发光高亮 / 面板同步更新；标记事件状态时状态壳同步。
+      let e3FocusZone = null; // 小程序人工指定重点区域（null = 按规则计算）
+
+      const __e3CalcPriority = calcPriority;
+      calcPriority = function () {
+        if (e3FocusZone) {
+          const z = e3FocusZone;
+          const d = zoneState[z];
+          return {
+            zone: z,
+            status: d ? d.status : '—',
+            crowdLevel: d ? d.crowdLevel : null,
+            anomalyCount: d2State[z].anomalyCount,
+            score: d2State[z].score,
+            review: d2State[z].review,
+            abnormal: true,      // 人工指定优先于规则计算结果
+            e3Assigned: true,
+          };
+        }
+        return __e3CalcPriority();
+      };
+      const __e3BuildReason = buildPriorityReason;
+      buildPriorityReason = function (winner) {
+        if (winner && winner.e3Assigned) return '小程序巡检端人工指定重点区域（跨端协同同步）';
+        return __e3BuildReason(winner);
+      };
+
+      const e3Client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000 });
+      e3Client.on('connect', function () {
+        e3Client.subscribe('airguard/e3/focus');
+        e3Client.subscribe('airguard/e3/event');
+      });
+      e3Client.on('message', function (topic, message) {
+        try {
+          const p = JSON.parse(new TextDecoder().decode(message));
+          if (!p || typeof p !== 'object' || Array.isArray(p)) return;
+          if (topic.indexOf('airguard/e3/focus') === 0) {
+            const z = p.zoneId;
+            e3FocusZone = Object.prototype.hasOwnProperty.call(ZONES, z) ? z : null;
+            updateD2Markers(); // 3D 发光高亮随重点区域切换
+            renderD2Panel();
+            console.log('[AirGuard][E3] 重点区域指令:', z || '（恢复规则判定）');
+          } else if (topic.indexOf('airguard/e3/event') === 0) {
+            const z = p.zoneId;
+            if (!Object.prototype.hasOwnProperty.call(ZONES, z)) return;
+            if (p.op === 'recovered') {
+              const ev = d3Events[z];
+              if (ev) {
+                ev.currentState = D3_STATE.RECOVERED;
+                ev.recoverTime = p.time || new Date().toLocaleString('zh-CN', { hour12: false });
+                ev.finalResult = '小程序巡检端标记已恢复' +
+                  (p.note ? '（' + p.note + '）' : '') + '：跨端事件同步';
+                ev.historyNotes.push('[小程序] ' + (p.time || '') + ' 标记事件已恢复');
+                d3History.push(ev);
+                d3Events[z] = null;
+                startOutlineRecover(z); // 外框从处理中黄色平滑渐变回环境色
+              }
+              renderD3Panel();
+              renderD2Panel();
+              console.log('[AirGuard][E3] 事件已恢复指令:', z);
+            } else if (p.op === 'handling') {
+              d3ApplyAction(z, p.note || '小程序标记处理中');
+              renderD3Panel();
+              renderD2Panel();
+              console.log('[AirGuard][E3] 事件处理中指令:', z);
+            }
+          }
+        } catch (e) {
+          console.error('[AirGuard][E3] 指令解析失败:', e);
+        }
+      });
+
       renderPanel(); // 初始：三区域均为「暂无实时数据」，建筑墙体灰色
       renderD2Panel(); // 初始：无优先关注区域
       renderD3Panel(); // 初始：三区域均无事件
