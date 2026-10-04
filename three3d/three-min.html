@@ -158,6 +158,11 @@
     .d4-line { font-size: 12px; color: var(--muted); padding: 4px 8px; border-radius: 6px; background: #f8fafc; }
     .d4-line.on { color: #2e7d32; background: #e8f5e9; }
     .d4-line.off { color: #c62828; background: #ffebee; }
+
+    /* ===== D5 规则与ML（左侧面板） ===== */
+    #d5-panel { display: grid; gap: 6px; margin-top: 4px; }
+    .d5-line { font-size: 12px; color: var(--muted); padding: 4px 8px; border-radius: 6px; background: #f8fafc; }
+    .d5-line.conflict { color: #b45309; background: #fff7e6; border: 1px solid #fcd34d; }
     .d4-btn {
       margin-top: 8px;
       font-size: 12px;
@@ -236,6 +241,10 @@
       <h2 class="d2-title">D4 链路状态<span class="tag">D4</span></h2>
       <div id="d4-panel"></div>
       <button id="btn-reconnect" class="d4-btn" type="button">手动重连</button>
+
+      <!-- D5 固定规则与ML辅助判断：不一致时建筑黄色闪烁提醒 -->
+      <h2 class="d2-title">D5 规则与ML<span class="tag">D5</span></h2>
+      <div id="d5-panel"></div>
     </aside>
     <section class="canvas-wrap" id="canvas-wrap">
       <div id="three-fallback" class="placeholder" style="display:none">Three.js CDN 加载失败，请检查网络后刷新</div>
@@ -342,6 +351,24 @@
       let mqttConnState = '';  // '' | 'on' | 'off'（Broker 连接状态）
       ZONE_IDS.forEach(function (z) { d4LastSeen[z] = null; d4Online[z] = false; });
 
+      // ============ D5 固定规则与ML辅助判断 ============
+      // 两套判断并行：固定阈值规则（pm25>75 或 co2>1000 → 环境异常）
+      //              轻量统计ML（当前值 vs 历史均值 + 倍数×标准差）
+      // crowdLevel 为独立附加数据，不参与 D5 规则/ML 对比，仅页面展示
+      const D5_HISTORY_MAX = 60; // 每个 zone 历史数组上限（防内存溢出）
+      const D5_MIN_SAMPLES = 6;  // 判定所需最少历史样本数（统计时排除当前值）
+      const D5_DEFAULT_MULT = 2;
+      let d5Mult = D5_DEFAULT_MULT; // 标准差倍数（总视图 UI 可调，此处用默认值）
+      const d5State = ZONE_IDS.reduce(function (acc, z) {
+        acc[z] = {
+          pm25Hist: [], co2Hist: [],
+          lastTime: null,
+          rule: '—', ml: '—', mismatch: false,
+          pm25: null, co2: null, pmThr: null, co2Thr: null,
+        };
+        return acc;
+      }, {});
+
       // ============ DOM ============
       const $conn = document.getElementById('conn');
       const $connText = document.getElementById('conn-text');
@@ -398,6 +425,8 @@
       const highlightShells = {}; // zone → D2 优先关注高亮壳（轻微闪烁标记重点区域）
       const d3Shells = {};        // zone → D3 状态标记壳（OPEN 白框 / HANDLING 橙闪 / RECOVERED 隐藏）
       const d3ShellState = {};    // zone → null | 'OPEN' | 'HANDLING'
+      const d5Shells = {};        // zone → D5 规则/ML 不一致黄色闪烁提醒壳
+      const d5ShellState = {};    // zone → 是否不一致（true 时黄闪）
       let d3InfoTimer = null;
       let priorityZone = null;    // 当前优先关注区域
       const SHELL_SIZES = {
@@ -528,6 +557,16 @@
           scene.add(d3Shell);
           d3Shells[z] = d3Shell;
           d3ShellState[z] = null;
+
+          // D5 规则/ML 不一致黄色闪烁提醒壳（最外层）
+          const d5Shell = new THREE.Mesh(
+            new THREE.BoxGeometry(SHELL_SIZES[z][0] * 1.12, SHELL_SIZES[z][1] * 1.12, SHELL_SIZES[z][2] * 1.12),
+            new THREE.MeshBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0, depthWrite: false })
+          );
+          d5Shell.position.set(POS[z], SHELL_SIZES[z][1] / 2, 0);
+          scene.add(d5Shell);
+          d5Shells[z] = d5Shell;
+          d5ShellState[z] = false;
         });
 
         // 自定义简单控制器：拖拽旋转 + 滚轮缩放
@@ -598,18 +637,18 @@
         return { canvas: canvas, texture: texture, sprite: sprite };
       }
 
-      function updateLabel(label, zone, d, offline) {
+      function updateLabel(label, zone, d, offline, mlConflict) {
         const ctx = label.canvas.getContext('2d');
         ctx.clearRect(0, 0, 512, 224);
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        // 第一行：区域名；第二行：状态（按状态色，离线灰显）；第三行：处置过程 / 断流提示
+        // 第一行：区域名；第二行：状态（按状态色，离线灰显，ML不一致追加标注）；第三行：处置过程 / 断流提示
         ctx.font = 'bold 44px "Microsoft YaHei", "Segoe UI", sans-serif';
         ctx.fillStyle = '#1f2937';
         ctx.fillText(ZONES[zone].name, 256, 46);
         ctx.font = 'bold 38px "Microsoft YaHei", "Segoe UI", sans-serif';
         ctx.fillStyle = offline ? WAIT_ACCENT : (d ? (STATUS_ACCENT[d.status] || WAIT_ACCENT) : WAIT_ACCENT);
-        ctx.fillText(offline ? '已离线' : (d ? d.status : '暂无数据'), 256, 98);
+        ctx.fillText(offline ? '已离线' : (d ? (d.status + (mlConflict ? ' · ML不一致' : '')) : '暂无数据'), 256, 98);
         ctx.font = '26px "Microsoft YaHei", "Segoe UI", sans-serif';
         ctx.fillStyle = '#37474f';
         if (offline) {
@@ -634,7 +673,8 @@
           buildings[z].walls.forEach(function (w) { repaintWall(w, hex); });
           // 地面热力光斑同步表达风险（离线清空）
           updateHeatSpot(heatSpots[z], eff);
-          updateLabel(labels[z], z, eff, !online);
+          updateLabel(labels[z], z, eff, !online,
+            !online ? false : !!(d5State[z] && d5State[z].mismatch));
           // D2 高亮壳颜色随状态强调色（是否可见由 animate 闪烁控制）
           if (highlightShells[z]) {
             highlightShells[z].material.color.set(
@@ -1075,6 +1115,102 @@
         setTimeout(function () { client.reconnect(); }, 300);
       }
 
+      // ============ D5：两套判断 / 脏数据前置检查 / 面板与3D提醒 ============
+      function d5MeanStd(arr) {
+        const n = arr.length;
+        let sum = 0, i;
+        for (i = 0; i < n; i++) sum += arr[i];
+        const mean = sum / n;
+        let sq = 0;
+        for (i = 0; i < n; i++) sq += (arr[i] - mean) * (arr[i] - mean);
+        return { mean: mean, std: Math.sqrt(sq / (n - 1)) }; // 样本标准差
+      }
+
+      function d5Rejudge(s) {
+        if (s.pm25Hist.length < D5_MIN_SAMPLES) {
+          s.ml = '数据积累中';
+          s.mismatch = false;
+          s.pmThr = null;
+          s.co2Thr = null;
+          return;
+        }
+        const mp = d5MeanStd(s.pm25Hist.slice(0, -1)); // 统计用历史（不含当前值）
+        const mc = d5MeanStd(s.co2Hist.slice(0, -1));
+        s.pmThr = Math.round((mp.mean + d5Mult * mp.std) * 10) / 10;
+        s.co2Thr = Math.round((mc.mean + d5Mult * mc.std) * 10) / 10;
+        s.ml = (s.pm25 > s.pmThr || s.co2 > s.co2Thr) ? '与历史明显不同' : '符合历史常态';
+        s.mismatch = (s.rule === '环境异常') !== (s.ml === '与历史明显不同');
+      }
+
+      // 每条有效报文驱动的 D5 处理（脏数据在写入历史前拦截）
+      function d5HandleMessage(zone, payload) {
+        try {
+          const s = d5State[zone];
+          const t = payload.time;
+          // ---- 数据质量前置检查 ----
+          if (payload.pm25 === undefined || payload.pm25 === null || payload.pm25 === '' ||
+              payload.co2 === undefined || payload.co2 === null || payload.co2 === '') {
+            console.warn('[AirGuard][D5] 脏数据:', zone, 'pm25/co2 为空或缺失，报文丢弃');
+            return;
+          }
+          const p = Number(payload.pm25);
+          const c = Number(payload.co2);
+          if (isNaN(p) || isNaN(c)) {
+            console.warn('[AirGuard][D5] 脏数据:', zone, 'pm25/co2 非数值，报文丢弃');
+            return;
+          }
+          if (p > 900) {
+            console.warn('[AirGuard][D5] 脏数据:', zone, 'pm25=' + p + ' 超出量程（>900），离群脏数据不参与计算');
+            return;
+          }
+          if (!t) {
+            console.warn('[AirGuard][D5] 脏数据:', zone, 'time 字段缺失，不更新历史数据');
+            return;
+          }
+          if (s.lastTime && t < s.lastTime) {
+            console.warn('[AirGuard][D5] 脏数据:', zone, '时间倒流（' + t + ' < ' + s.lastTime + '），不更新历史数据');
+            return;
+          }
+          s.lastTime = t;
+
+          // ---- 追加历史（长度受控，防内存溢出） ----
+          s.pm25Hist.push(p);
+          s.co2Hist.push(c);
+          if (s.pm25Hist.length > D5_HISTORY_MAX) s.pm25Hist.shift();
+          if (s.co2Hist.length > D5_HISTORY_MAX) s.co2Hist.shift();
+          s.pm25 = p;
+          s.co2 = c;
+
+          // ---- 两套判断 + 日志 ----
+          s.rule = (p > 75 || c > 1000) ? '环境异常' : '正常';
+          d5Rejudge(s);
+          console.log('[AirGuard][D5]', zone,
+            'pm25=' + p, 'co2=' + c,
+            '规则=' + s.rule, 'ML=' + s.ml,
+            s.pmThr !== null ? '阈值 pm25=' + s.pmThr + '/co2=' + s.co2Thr : '',
+            '一致=' + (s.mismatch ? '否(建议人工复核)' : '是'));
+          renderD5Panel();
+          updateScene(); // 刷新标签「ML不一致」文字标注与黄色闪烁壳
+        } catch (e) {
+          console.error('[AirGuard] D5 处理异常:', e);
+        }
+      }
+
+      // 左侧面板 D5 简要信息 + 黄色闪烁壳状态
+      function renderD5Panel() {
+        const $d5Panel = document.getElementById('d5-panel');
+        $d5Panel.innerHTML = ZONE_IDS.map(function (z) {
+          const s = d5State[z];
+          d5ShellState[z] = !!s.mismatch;
+          const mlText = s.ml === '数据积累中'
+            ? '数据积累中(' + s.pm25Hist.length + '/' + D5_MIN_SAMPLES + ')'
+            : (s.ml === '与历史明显不同' ? 'ML异常' : 'ML常态');
+          const line = ZONES[z].name + '：规则' + (s.rule === '环境异常' ? '异常' : (s.rule === '—' ? '—' : '正常')) +
+            ' · ' + mlText + ' · ' + (s.mismatch ? '⚠不一致' : '一致');
+          return '<div class="d5-line' + (s.mismatch ? ' conflict' : '') + '">' + line + '</div>';
+        }).join('');
+      }
+
       // ============ 钟盘纹理（教学区钟楼） ============
       function makeClockTexture() {
         const canvas = document.createElement('canvas');
@@ -1270,6 +1406,16 @@
             shell.material.opacity = 0;
           }
         });
+        // D5 规则/ML 不一致提醒壳：黄色闪烁，一致时隐藏
+        ZONE_IDS.forEach(function (z) {
+          const shell = d5Shells[z];
+          if (!shell) return;
+          if (d5ShellState[z]) {
+            shell.material.opacity = 0.3 + 0.3 * (0.5 + 0.5 * Math.sin(performance.now() * 0.006));
+          } else {
+            shell.material.opacity = 0;
+          }
+        });
         camera.position.set(
           TARGET.x + radius * Math.sin(phi) * Math.sin(theta),
           TARGET.y + radius * Math.cos(phi),
@@ -1380,6 +1526,8 @@
         updateD2(zone, status, payload.crowdLevel, payload.crowdSource, payload.crowdConfidence);
         // D3：驱动状态机（数据触发；OPEN→HANDLING 仅由按钮人工触发）
         d3HandleMessage(zone, payload, status);
+        // D5：两套判断（固定规则 + 轻量ML），脏数据前置拦截
+        d5HandleMessage(zone, payload);
         renderPanel();
         renderD2Panel();
         renderD3Panel();
@@ -1441,6 +1589,7 @@
       renderD2Panel(); // 初始：无优先关注区域
       renderD3Panel(); // 初始：三区域均无事件
       renderD4Panel(); // 初始：MQTT 断开 + 三区域离线
+      renderD5Panel(); // 初始：D5 数据积累中
     })();
   </script>
 </body>

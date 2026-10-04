@@ -309,12 +309,43 @@
     }
     .d4-btn:hover { background: #2563eb; color: #fff; }
 
+    /* ===== D5 固定规则与ML辅助判断 ===== */
+    #panel-d5 { grid-column: 1 / -1; }
+    .d5-params { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+    .d5-params input {
+      width: 64px;
+      padding: 3px 6px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 12px;
+    }
+    .d5-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+    .d5-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: #f8fafc; }
+    .d5-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .d5-card-head b { font-size: 14px; }
+    .d5-badge { font-size: 12px; padding: 1px 10px; border-radius: 999px; color: #fff; margin-left: auto; white-space: nowrap; }
+    .d5-badge.ok { background: #22c55e; }
+    .d5-badge.bad { background: #ef4444; }
+    .d5-rows { list-style: none; font-size: 13px; color: #374151; display: grid; gap: 4px; }
+    .d5-rows .ml { color: #6d28d9; }
+    .d5-rows .verdict { font-weight: 600; }
+    .d5-rows .conflict { color: #c62828; }
+    .d5-hist-details summary { font-size: 12px; color: var(--muted); cursor: pointer; margin-top: 8px; }
+    .d5-hist { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+    .d5-hist th, .d5-hist td { border: 1px solid var(--border); padding: 3px 8px; text-align: center; }
+    .d5-hist th { background: #fff; color: var(--muted); }
+    #d5-dirty-details { margin-top: 12px; }
+    #d5-dirty-details summary { font-size: 13px; color: var(--muted); cursor: pointer; padding: 4px 0; }
+    .d5-dirty { list-style: none; font-size: 12px; max-height: 140px; overflow-y: auto; }
+    .d5-dirty li { padding: 3px 8px; border-bottom: 1px dashed var(--border); color: #b45309; }
+
     @media (max-width: 960px) {
       .layout { grid-template-columns: 1fr; }
       #panel-overview { grid-column: auto; }
       #panel-d2 { grid-column: auto; }
       #panel-d3 { grid-column: auto; }
       #panel-d4 { grid-column: auto; }
+      #panel-d5 { grid-column: auto; }
       .overview-grid { grid-template-columns: 1fr; }
       .d4-grid { grid-template-columns: 1fr; }
     }
@@ -431,6 +462,23 @@
         </div>
       </div>
     </section>
+
+    <!-- ===== 下方：D5 固定规则与ML辅助判断 ===== -->
+    <section class="panel" id="panel-d5">
+      <div class="panel-head">
+        <h2>D5 固定规则与ML辅助判断<span class="tag">D5</span></h2>
+        <div class="d5-params">
+          标准差倍数
+          <input id="d5-mult" type="number" value="2" min="0.5" max="5" step="0.5">
+          <span>（现场调参：修改后裁决实时变化）</span>
+        </div>
+      </div>
+      <div id="d5-zones" class="d5-grid"></div>
+      <details id="d5-dirty-details">
+        <summary>脏数据日志</summary>
+        <ul id="d5-dirty-log" class="d5-dirty"></ul>
+      </details>
+    </section>
   </main>
 
   <script>
@@ -515,6 +563,25 @@
       let mqttConnState = '';  // '' | 'on' | 'off'（Broker 连接状态）
       ZONE_IDS.forEach(function (z) { d4LastSeen[z] = null; d4Online[z] = false; });
 
+      // ============ D5 固定规则与ML辅助判断 ============
+      // 两套判断并行：固定阈值规则（pm25>75 或 co2>1000 → 环境异常）
+      //              轻量统计ML（当前值 vs 历史均值 + 倍数×标准差）
+      // crowdLevel 为独立附加数据，不参与 D5 规则/ML 对比，仅页面展示
+      const D5_HISTORY_MAX = 60; // 每个 zone 历史数组上限（防内存溢出）
+      const D5_MIN_SAMPLES = 6;  // 判定所需最少历史样本数（统计时排除当前值，用前 N-1 条）
+      const D5_DEFAULT_MULT = 2;
+      let d5Mult = D5_DEFAULT_MULT; // 标准差倍数（页面 UI 可改，实时生效）
+      const d5State = ZONE_IDS.reduce(function (acc, z) {
+        acc[z] = {
+          pm25Hist: [], co2Hist: [],
+          lastTime: null,
+          rule: '—', ml: '—', mismatch: false,
+          pm25: null, co2: null, pmThr: null, co2Thr: null,
+        };
+        return acc;
+      }, {});
+      const d5DirtyRecords = []; // 脏数据日志 {at, zone, reason}（最多 50 条）
+
       // 简易事件记录（D3 状态机后续迭代，当前仅记录异常状态变化）
       const eventLog = [];
       const EVENT_LOG_MAX = 100;
@@ -541,6 +608,9 @@
       const $recCount = document.getElementById('rec-count');
       const $btnRecToggle = document.getElementById('btn-rec-toggle');
       const $btnRecExport = document.getElementById('btn-rec-export');
+      const $d5Zones = document.getElementById('d5-zones');
+      const $d5DirtyLog = document.getElementById('d5-dirty-log');
+      const $d5Mult = document.getElementById('d5-mult');
 
       // ============ status 计算（任务书：按顺序判定，仅用 pm25 / co2） ============
       function calcStatus(pm25, co2) {
@@ -684,6 +754,9 @@
           $btnRecExport.disabled = false;
         }
 
+        // D5：两套判断（固定规则 + 轻量ML），脏数据前置拦截
+        d5HandleMessage(zone, payload);
+
         // 简易事件记录：仅当状态变为异常（非“正常”）时追加一条，避免重复消息刷屏
         if (status !== '正常' && (!prev || prev.status !== status)) {
           eventLog.push({
@@ -707,6 +780,7 @@
         renderD2();
         renderD3();
         renderD4();
+        renderD5();
       }
 
       function renderTopbar() {
@@ -1081,6 +1155,139 @@
         URL.revokeObjectURL(url);
       }
 
+      // ============ D5：两套判断 / 脏数据前置检查 / 协同裁决（规则优先） ============
+      function d5MeanStd(arr) {
+        const n = arr.length;
+        let sum = 0, i;
+        for (i = 0; i < n; i++) sum += arr[i];
+        const mean = sum / n;
+        let sq = 0;
+        for (i = 0; i < n; i++) sq += (arr[i] - mean) * (arr[i] - mean);
+        return { mean: mean, std: Math.sqrt(sq / (n - 1)) }; // 样本标准差
+      }
+
+      function d5LogDirty(zone, reason) {
+        d5DirtyRecords.unshift({ at: new Date(), zone: zone, reason: reason });
+        if (d5DirtyRecords.length > 50) d5DirtyRecords.pop();
+        console.warn('[AirGuard][D5] 脏数据:', zone, reason);
+      }
+
+      // ML 判定 + 一致性 + 裁决重算（参数修改后调用可实现实时变化）
+      function d5Rejudge(s) {
+        if (s.pm25Hist.length < D5_MIN_SAMPLES) {
+          s.ml = '数据积累中';
+          s.mismatch = false;
+          s.pmThr = null;
+          s.co2Thr = null;
+          return;
+        }
+        // 统计用历史（不含当前值），当前值只做对比
+        const mp = d5MeanStd(s.pm25Hist.slice(0, -1));
+        const mc = d5MeanStd(s.co2Hist.slice(0, -1));
+        s.pmThr = Math.round((mp.mean + d5Mult * mp.std) * 10) / 10;
+        s.co2Thr = Math.round((mc.mean + d5Mult * mc.std) * 10) / 10;
+        s.ml = (s.pm25 > s.pmThr || s.co2 > s.co2Thr) ? '与历史明显不同' : '符合历史常态';
+        // 一致性：规则结果与 ML 结果是否同向（规则优先，不一致标注建议人工复核）
+        s.mismatch = (s.rule === '环境异常') !== (s.ml === '与历史明显不同');
+      }
+
+      // 每条有效报文驱动的 D5 处理（脏数据在写入历史前拦截）
+      function d5HandleMessage(zone, payload) {
+        try {
+          const s = d5State[zone];
+          const t = payload.time;
+
+          // ---- 数据质量前置检查 ----
+          if (payload.pm25 === undefined || payload.pm25 === null || payload.pm25 === '' ||
+              payload.co2 === undefined || payload.co2 === null || payload.co2 === '') {
+            d5LogDirty(zone, 'pm25/co2 为空或缺失，报文丢弃');
+            return;
+          }
+          const p = Number(payload.pm25);
+          const c = Number(payload.co2);
+          if (isNaN(p) || isNaN(c)) {
+            d5LogDirty(zone, 'pm25/co2 非数值，报文丢弃');
+            return;
+          }
+          if (p > 900) {
+            d5LogDirty(zone, 'pm25=' + p + ' 超出量程（>900），离群脏数据不参与计算');
+            return;
+          }
+          if (!t) {
+            d5LogDirty(zone, 'time 字段缺失，不更新历史数据');
+            return;
+          }
+          if (s.lastTime && t < s.lastTime) {
+            d5LogDirty(zone, '时间倒流（' + t + ' < ' + s.lastTime + '），不更新历史数据');
+            return;
+          }
+          s.lastTime = t;
+
+          // ---- 追加历史（长度受控，防内存溢出） ----
+          s.pm25Hist.push(p);
+          s.co2Hist.push(c);
+          if (s.pm25Hist.length > D5_HISTORY_MAX) s.pm25Hist.shift();
+          if (s.co2Hist.length > D5_HISTORY_MAX) s.co2Hist.shift();
+          s.pm25 = p;
+          s.co2 = c;
+
+          // ---- 两套判断 ----
+          s.rule = (p > 75 || c > 1000) ? '环境异常' : '正常';
+          d5Rejudge(s);
+
+          // ---- 判断结果写日志（截图取证） ----
+          console.log('[AirGuard][D5]', zone,
+            'pm25=' + p, 'co2=' + c,
+            '规则=' + s.rule, 'ML=' + s.ml,
+            s.pmThr !== null ? '阈值 pm25=' + s.pmThr + '/co2=' + s.co2Thr : '',
+            '一致=' + (s.mismatch ? '否(建议人工复核)' : '是'));
+        } catch (e) {
+          console.error('[AirGuard] D5 处理异常:', e);
+        }
+      }
+
+      function d5VerdictText(s) {
+        let verdict = s.rule === '环境异常'
+          ? '综合裁决（规则优先）：环境异常，建议按异常处置'
+          : '综合裁决（规则优先）：正常，维持常规监测';
+        if (s.mismatch) verdict += '；<span class="conflict">两套结论不一致，建议人工复核</span>';
+        return verdict;
+      }
+
+      function renderD5() {
+        $d5Zones.innerHTML = ZONE_IDS.map(function (z) {
+          const s = d5State[z];
+          const mlLine = s.ml === '数据积累中'
+            ? 'ML 判定：数据积累中（' + s.pm25Hist.length + '/' + D5_MIN_SAMPLES + ' 条）'
+            : 'ML 判定：' + s.ml + '（pm25 ' + s.pm25 + ' vs 阈值 ' + s.pmThr + '；co2 ' + s.co2 + ' vs 阈值 ' + s.co2Thr + '）';
+          const histHtml = s.pm25Hist.length === 0
+            ? '<p class="d3-empty">暂无历史数据</p>'
+            : '<table class="d5-hist"><tr><th>序号</th><th>PM2.5</th><th>CO₂</th></tr>' +
+              s.pm25Hist.slice(-10).map(function (v, i) {
+                const idx = s.pm25Hist.length - 10 + i;
+                return '<tr><td>' + (idx + 1) + '</td><td>' + v + '</td><td>' + s.co2Hist[idx] + '</td></tr>';
+              }).join('') + '</table>';
+          return '<div class="d5-card">' +
+            '<div class="d5-card-head"><b>' + ZONES[z].name + '（' + z + '）</b>' +
+            '<span class="d5-badge ' + (s.mismatch ? 'bad' : 'ok') + '">' +
+            (s.mismatch ? '⚠ 结论不一致' : '一致') + '</span></div>' +
+            '<ul class="d5-rows">' +
+            '<li>当前 PM2.5 / CO₂：' + (s.pm25 === null ? '—' : s.pm25) + ' / ' + (s.co2 === null ? '—' : s.co2) + '</li>' +
+            '<li>固定规则：' + s.rule + '（pm25&gt;75 或 co2&gt;1000 为异常）</li>' +
+            '<li class="ml">' + mlLine + '</li>' +
+            '<li class="verdict">' + d5VerdictText(s) + '</li>' +
+            '</ul>' +
+            '<details class="d5-hist-details"><summary>历史数据（最近10条）</summary>' + histHtml + '</details>' +
+            '</div>';
+        }).join('');
+        $d5DirtyLog.innerHTML = d5DirtyRecords.length === 0
+          ? '<li>暂无脏数据记录</li>'
+          : d5DirtyRecords.map(function (r) {
+              return '<li><span class="ev-time">' + r.at.toLocaleTimeString('zh-CN', { hour12: false }) + '</span>' +
+                ZONES[r.zone].name + '：' + r.reason + '</li>';
+            }).join('');
+      }
+
       // ============ D4：链路状态面板 / 定时在线判定 / 手动重连 ============
       function renderD4() {
         $d4Broker.innerHTML = 'MQTT Broker 状态：<b style="color:' +
@@ -1187,6 +1394,14 @@
       // 数据链A：开始/停止记录 + 导出 CSV
       $btnRecToggle.addEventListener('click', recToggle);
       $btnRecExport.addEventListener('click', recExportCsv);
+
+      // D5：标准差倍数现场调参（修改后实时重新裁决）
+      $d5Mult.addEventListener('input', function () {
+        const v = parseFloat($d5Mult.value);
+        d5Mult = (isNaN(v) || v <= 0) ? D5_DEFAULT_MULT : v;
+        ZONE_IDS.forEach(function (z) { d5Rejudge(d5State[z]); });
+        renderD5();
+      });
 
       renderAll(); // 初始渲染：所有模块显示等待状态
     })();
