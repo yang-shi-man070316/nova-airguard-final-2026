@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AirGuard D5 判定查看器 · CSV 上传</title>
+  <style>
+    :root {
+      --bg: #eef1f5;
+      --panel-bg: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --nav-bg: #0f172a;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .topbar {
+      background: var(--nav-bg);
+      color: #e5e7eb;
+      padding: 14px 24px;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      flex-shrink: 0;
+    }
+    .topbar h1 { font-size: 18px; color: #fff; }
+    .topbar .sub { font-size: 12px; color: #94a3b8; margin-top: 2px; }
+
+    /* 满屏布局：上传横跨顶部，卡片居中，历史+脏数据左右分栏 */
+    .wrap {
+      flex: 1;
+      width: 100%;
+      padding: 16px 24px 24px;
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      grid-template-areas:
+        "upload upload"
+        "cards cards"
+        "history dirty";
+      gap: 16px;
+      align-content: start;
+    }
+    #panel-upload { grid-area: upload; }
+    #panel-summary { grid-area: cards; }
+    #panel-history { grid-area: history; }
+    #panel-dirty { grid-area: dirty; }
+
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .04);
+      min-height: 0;
+    }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .panel-head h2 { font-size: 15px; }
+    .hint { font-size: 12px; color: var(--muted); line-height: 1.7; }
+    .file-box {
+      border: 2px dashed #cbd5e1;
+      border-radius: 10px;
+      padding: 18px 22px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      background: #f8fafc;
+      flex-wrap: wrap;
+    }
+    .file-box input { font-size: 13px; }
+    .file-meta { font-size: 12px; color: var(--muted); }
+    .cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 12px;
+    }
+    .zone-card {
+      border: 1px solid var(--border);
+      border-left: 4px solid #9ca3af;
+      border-radius: 8px;
+      padding: 12px;
+      background: #f8fafc;
+    }
+    .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .card-head b { font-size: 14px; }
+    .zone-id { font-size: 11px; color: var(--muted); font-family: Consolas, monospace; }
+    .tag { font-size: 12px; padding: 2px 10px; border-radius: 999px; color: #fff; margin-left: auto; white-space: nowrap; }
+    .tag.ok { background: #22c55e; }
+    .tag.bad { background: #ef4444; }
+    .tag.wait { background: #9ca3af; }
+    .rows { list-style: none; font-size: 13px; color: #374151; display: grid; gap: 4px; }
+    .rows .ml { color: #6d28d9; }
+    .rows .verdict { font-weight: 600; }
+    .rows .conflict { color: #c62828; }
+    .zone-empty { color: var(--muted); font-size: 13px; }
+    .hist-wrap { margin-bottom: 16px; }
+    .hist-wrap h3 { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+    .hist-table { width: 100%; border-collapse: collapse; font-size: 12px; background: #fff; }
+    .hist-table th, .hist-table td { border: 1px solid var(--border); padding: 4px 8px; text-align: center; }
+    .hist-table th { background: #f8fafc; color: var(--muted); }
+    .hist-table .mismatch-row td { background: #fff8e6; }
+    #history-tables { max-height: 560px; overflow-y: auto; }
+    .dirty-log { list-style: none; font-size: 12px; max-height: 560px; overflow-y: auto; }
+    .dirty-log li { padding: 4px 8px; border-bottom: 1px dashed var(--border); color: #b45309; }
+    .dirty-log li.empty { color: var(--muted); }
+    .line-no { font-family: Consolas, monospace; color: var(--muted); margin-right: 8px; }
+
+    @media (max-width: 960px) {
+      .wrap { grid-template-columns: 1fr; grid-template-areas: "upload" "cards" "history" "dirty"; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>AirGuard D5 判定查看器</h1>
+      <div class="sub">上传 CSV → 固定安全规则 + ML 统计动态阈值 双判定 · 纯前端，无后端</div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- 上传区（横跨整行） -->
+    <section class="panel" id="panel-upload">
+      <div class="panel-head">
+        <h2>上传 CSV 数据</h2>
+      </div>
+      <div class="file-box">
+        <input type="file" id="file-input" accept=".csv,text/csv">
+        <p class="hint">
+          支持字段：zoneId（zone-n/zone-s/zone-w）、pm25、co2、time（yyyy-MM-dd HH:mm:ss），crowdLevel 可选，列顺序不限。<br>
+          每次上传新文件将替换当前全部数据并自动重新判定；刷新页面后内存清空，需重新上传。
+        </p>
+      </div>
+    </section>
+
+    <!-- 判定概览卡片（整行） -->
+    <section class="panel" id="panel-summary">
+      <div class="panel-head">
+        <h2>各区域判定卡片</h2>
+        <span id="file-meta" class="file-meta">尚未上传文件</span>
+      </div>
+      <div id="zone-cards" class="cards-grid">
+        <div class="zone-card"><div class="card-head"><b>宿舍区</b><span class="zone-id">zone-n</span><span class="tag wait">等待上传</span></div><p class="zone-empty">上传 CSV 后显示判定结果</p></div>
+        <div class="zone-card"><div class="card-head"><b>教学区</b><span class="zone-id">zone-s</span><span class="tag wait">等待上传</span></div><p class="zone-empty">上传 CSV 后显示判定结果</p></div>
+        <div class="zone-card"><div class="card-head"><b>食堂区</b><span class="zone-id">zone-w</span><span class="tag wait">等待上传</span></div><p class="zone-empty">上传 CSV 后显示判定结果</p></div>
+      </div>
+    </section>
+
+    <!-- 历史数据表格（左，2/3 宽） -->
+    <section class="panel" id="panel-history">
+      <div class="panel-head">
+        <h2>历史数据表格（含逐条判定，最多显示最近 100 条）</h2>
+      </div>
+      <div id="history-tables"><div class="hist-wrap"><h3>上传 CSV 后显示历史数据表格</h3></div></div>
+    </section>
+
+    <!-- 脏数据日志（右，1/3 宽） -->
+    <section class="panel" id="panel-dirty">
+      <div class="panel-head">
+        <h2>脏数据日志</h2>
+      </div>
+      <ul id="dirty-log" class="dirty-log"><li class="empty">暂无脏数据记录</li></ul>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      'use strict';
+
+      // ============ 配置（与 AirGuard 监测台 D5 规则一致） ============
+      const ZONES = ['zone-n', 'zone-s', 'zone-w'];
+      const ZONE_CN = { 'zone-n': '宿舍区', 'zone-s': '教学区', 'zone-w': '食堂区' };
+      const D5_MIN_SAMPLES = 6;    // 判定所需最少样本数（含当前值，统计用前 N-1 条）
+      const D5_MULT = 2;           // 标准差倍数
+      const DISPLAY_MAX = 100;     // 历史表格最多显示条数
+
+      const $fileInput = document.getElementById('file-input');
+      const $fileMeta = document.getElementById('file-meta');
+      const $zoneCards = document.getElementById('zone-cards');
+      const $historyTables = document.getElementById('history-tables');
+      const $dirtyLog = document.getElementById('dirty-log');
+
+      let dirtyLog = [];    // {line, zone, reason}
+      let zonesData = {};   // zone → { rows: [{pm25,co2,time}], verdicts: [...] }
+
+      // ============ CSV 解析 ============
+      function parseCsv(text) {
+        const lines = text.split(/\r?\n/).filter(function (l) { return l.trim() !== ''; });
+        if (lines.length === 0) return { header: null, rows: [] };
+        const header = lines[0].split(',').map(function (h) { return h.trim().replace(/^﻿/, ''); });
+        const idx = {
+          zoneId: header.indexOf('zoneId') >= 0 ? header.indexOf('zoneId') : header.indexOf('zoneid'),
+          pm25: header.indexOf('pm25'),
+          co2: header.indexOf('co2'),
+          time: header.indexOf('time') >= 0 ? header.indexOf('time') : header.indexOf('timestamp'),
+        };
+        const rows = [];
+        for (let i = 1; i < lines.length; i++) {
+          const cols = lines[i].split(',');
+          if (cols.length < header.length) continue;
+          rows.push({
+            line: i + 1,
+            zoneId: idx.zoneId >= 0 ? cols[idx.zoneId].trim() : '',
+            pm25: idx.pm25 >= 0 ? cols[idx.pm25].trim() : '',
+            co2: idx.co2 >= 0 ? cols[idx.co2].trim() : '',
+            time: idx.time >= 0 ? cols[idx.time].trim() : '',
+          });
+        }
+        return { header: header, idx: idx, rows: rows };
+      }
+
+      // ============ D5 两套判定 ============
+      function d5MeanStd(arr) {
+        const n = arr.length;
+        let sum = 0, i;
+        for (i = 0; i < n; i++) sum += arr[i];
+        const mean = sum / n;
+        let sq = 0;
+        for (i = 0; i < n; i++) sq += (arr[i] - mean) * (arr[i] - mean);
+        return { mean: mean, std: Math.sqrt(sq / (n - 1)) }; // 样本标准差
+      }
+
+      // 对单个 zone 的有效行逐条判定（固定规则 + ML 统计动态阈值，规则优先裁决）
+      function analyzeZone(zone, rows) {
+        const verdicts = [];
+        const pm25Hist = [];
+        const co2Hist = [];
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i];
+          const rule = (r.pm25 > 75 || r.co2 > 1000) ? '环境异常' : '正常';
+
+          pm25Hist.push(r.pm25);
+          co2Hist.push(r.co2);
+
+          let ml = '数据积累中';
+          let pmThr = null, co2Thr = null;
+          if (pm25Hist.length >= D5_MIN_SAMPLES) {
+            // 统计用历史（不含当前值），当前值只做对比
+            const mp = d5MeanStd(pm25Hist.slice(0, -1));
+            const mc = d5MeanStd(co2Hist.slice(0, -1));
+            pmThr = Math.round((mp.mean + D5_MULT * mp.std) * 10) / 10;
+            co2Thr = Math.round((mc.mean + D5_MULT * mc.std) * 10) / 10;
+            ml = (r.pm25 > pmThr || r.co2 > co2Thr) ? '与历史明显不同' : '符合历史常态';
+          }
+          const mismatch = (rule === '环境异常') !== (ml === '与历史明显不同');
+          verdicts.push({
+            seq: i + 1,
+            time: r.time, pm25: r.pm25, co2: r.co2,
+            rule: rule, ml: ml, mismatch: mismatch,
+            pmThr: pmThr, co2Thr: co2Thr,
+          });
+        }
+        return verdicts;
+      }
+
+      // ============ 主流程：上传 → 解析 → 清洗 → 判定 → 渲染 ============
+      function handleFile(file) {
+        // 重置：新文件替换上一份全部内容
+        dirtyLog = [];
+        zonesData = {};
+
+        const reader = new FileReader();
+        reader.onload = function () {
+          const parsed = parseCsv(String(reader.result));
+          if (!parsed.header || parsed.idx.zoneId < 0 || parsed.idx.pm25 < 0 || parsed.idx.co2 < 0) {
+            alert('CSV 缺少必需列：zoneId / pm25 / co2（列名需一致，顺序不限）');
+            return;
+          }
+          // 收集各 zone 有效行（脏数据拦截 + 日志）
+          const pending = {};
+          parsed.rows.forEach(function (r) {
+            if (ZONES.indexOf(r.zoneId) < 0) {
+              dirtyLog.push({ line: r.line, zone: r.zoneId || '—', reason: 'zoneId 非法取值（应为 zone-n/s/w）' });
+              return;
+            }
+            if (r.pm25 === '' || r.co2 === '') {
+              dirtyLog.push({ line: r.line, zone: r.zoneId, reason: 'pm25/co2 为空或缺失，报文丢弃' });
+              return;
+            }
+            const p = Number(r.pm25);
+            const c = Number(r.co2);
+            if (isNaN(p) || isNaN(c)) {
+              dirtyLog.push({ line: r.line, zone: r.zoneId, reason: 'pm25/co2 非数值，报文丢弃' });
+              return;
+            }
+            if (p > 900) {
+              dirtyLog.push({ line: r.line, zone: r.zoneId, reason: 'pm25=' + p + ' 超出量程（>900），离群脏数据不参与计算' });
+              return;
+            }
+            if (!r.time) {
+              dirtyLog.push({ line: r.line, zone: r.zoneId, reason: 'time 字段缺失，不更新历史数据' });
+              return;
+            }
+            const zoneRows = pending[r.zoneId] || (pending[r.zoneId] = []);
+            const last = zoneRows.length ? zoneRows[zoneRows.length - 1].time : null;
+            if (last && r.time < last) {
+              dirtyLog.push({ line: r.line, zone: r.zoneId, reason: '时间倒流（' + r.time + ' < ' + last + '），不更新历史数据' });
+              return;
+            }
+            zoneRows.push({ pm25: p, co2: c, time: r.time });
+          });
+
+          // 逐 zone 判定
+          ZONES.forEach(function (z) {
+            const rows = pending[z] || [];
+            zonesData[z] = { rows: rows, verdicts: analyzeZone(z, rows) };
+          });
+
+          renderAll(file.name, parsed.rows.length);
+        };
+        reader.readAsText(file, 'utf-8');
+      }
+
+      // ============ 渲染 ============
+      function verdictText(v) {
+        let t = v.rule === '环境异常' ? '综合裁决（规则优先）：环境异常，建议按异常处置' : '综合裁决（规则优先）：正常，维持常规监测';
+        if (v.mismatch) t += '；<span class="conflict">两套结论不一致，建议人工复核</span>';
+        return t;
+      }
+
+      function renderAll(fileName, totalLines) {
+        let validCount = 0;
+        const cardHtml = ZONES.map(function (z) {
+          const d = zonesData[z];
+          if (!d || d.verdicts.length === 0) {
+            return '<div class="zone-card"><div class="card-head"><b>' + ZONE_CN[z] +
+              '</b><span class="zone-id">' + z + '</span><span class="tag wait">无有效数据</span></div>' +
+              '<p class="zone-empty">该区域没有通过质量检查的有效记录</p></div>';
+          }
+          const v = d.verdicts[d.verdicts.length - 1]; // 最新一条判定
+          validCount += d.verdicts.length;
+          const tagCls = v.mismatch ? 'bad' : 'ok';
+          const tagText = v.mismatch ? 'Δ结论不一致' : '一致';
+          const mlLine = v.ml === '数据积累中'
+            ? 'ML 判定：数据积累中（' + d.verdicts.length + '/' + D5_MIN_SAMPLES + ' 条）'
+            : 'ML 判定：' + v.ml + '（pm25 ' + v.pm25 + ' vs 阈值 ' + v.pmThr + '；co2 ' + v.co2 + ' vs 阈值 ' + v.co2Thr + '）';
+          return '<div class="zone-card">' +
+            '<div class="card-head"><b>' + ZONE_CN[z] + '</b><span class="zone-id">' + z + '</span>' +
+            '<span class="tag ' + tagCls + '">' + tagText + '</span></div>' +
+            '<ul class="rows">' +
+            '<li>当前 PM2.5 / CO₂：' + v.pm25 + ' / ' + v.co2 + '（' + v.time + '）</li>' +
+            '<li>固定规则：' + v.rule + '（pm25&gt;75 或 co2&gt;1000 为异常）</li>' +
+            '<li class="ml">' + mlLine + '</li>' +
+            '<li class="verdict">' + verdictText(v) + '</li>' +
+            '</ul></div>';
+        }).join('');
+        $zoneCards.innerHTML = cardHtml;
+        $fileMeta.textContent = '文件：' + fileName + ' ｜ 读取行数 ' + totalLines + ' ｜ 有效记录 ' + validCount + ' ｜ 脏数据 ' + dirtyLog.length;
+
+        // 历史数据表格（每 zone 一张，最多显示最近 100 条，序号从 1 开始）
+        $historyTables.innerHTML = ZONES.map(function (z) {
+          const d = zonesData[z];
+          if (!d || d.verdicts.length === 0) {
+            return '<div class="hist-wrap"><h3>' + ZONE_CN[z] + '（' + z + '）：无有效数据</h3></div>';
+          }
+          const shown = d.verdicts.slice(-DISPLAY_MAX);
+          const startSeq = d.verdicts.length - shown.length + 1;
+          const rows = shown.map(function (v, i) {
+            const seq = startSeq + i;
+            return '<tr class="' + (v.mismatch ? 'mismatch-row' : '') + '">' +
+              '<td>' + seq + '</td><td>' + v.time + '</td>' +
+              '<td>' + v.pm25 + '</td><td>' + v.co2 + '</td>' +
+              '<td>' + v.rule + '</td><td>' + v.ml + '</td>' +
+              '<td>' + (v.mismatch ? '⚠不一致' : '一致') + '</td></tr>';
+          }).join('');
+          return '<div class="hist-wrap"><h3>' + ZONE_CN[z] + '（' + z + '）· 共 ' +
+            d.verdicts.length + ' 条</h3>' +
+            '<table class="hist-table"><tr><th>序号</th><th>time</th><th>PM2.5</th><th>CO₂</th>' +
+            '<th>固定规则</th><th>ML判定</th><th>一致性</th></tr>' + rows + '</table></div>';
+        }).join('');
+
+        // 脏数据日志
+        $dirtyLog.innerHTML = dirtyLog.length === 0
+          ? '<li class="empty">暂无脏数据记录</li>'
+          : dirtyLog.map(function (d) {
+              return '<li><span class="line-no">行 ' + d.line + '</span>' +
+                (ZONE_CN[d.zone] ? ZONE_CN[d.zone] : '区域[' + d.zone + ']') + '：' + d.reason + '</li>';
+            }).join('');
+      }
+
+      $fileInput.addEventListener('change', function () {
+        if ($fileInput.files && $fileInput.files[0]) {
+          handleFile($fileInput.files[0]);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
