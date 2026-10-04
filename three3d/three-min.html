@@ -142,7 +142,7 @@
       left: 12px;
       top: 12px;
       z-index: 4;
-      max-width: 280px;
+      max-width: 300px;
       background: rgba(255, 255, 255, 0.96);
       border: 1px solid var(--border);
       border-radius: 10px;
@@ -152,6 +152,20 @@
       color: var(--text);
       box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
     }
+    .d3-info b.zname { font-size: 13px; }
+    .d3-info .info-row { margin-top: 2px; }
+    .d3-info .focus-reset {
+      margin-top: 8px;
+      font-size: 12px;
+      padding: 4px 12px;
+      border: 1px solid #2563eb;
+      color: #2563eb;
+      background: #fff;
+      border-radius: 6px;
+      cursor: pointer;
+      width: 100%;
+    }
+    .d3-info .focus-reset:hover { background: #2563eb; color: #fff; }
 
     /* ===== D4 链路状态（左侧面板） ===== */
     #d4-panel { display: grid; gap: 6px; margin-top: 4px; }
@@ -248,7 +262,7 @@
     </aside>
     <section class="canvas-wrap" id="canvas-wrap">
       <div id="three-fallback" class="placeholder" style="display:none">Three.js CDN 加载失败，请检查网络后刷新</div>
-      <div class="op-hint">拖拽旋转 · 滚轮缩放 · 点击建筑查看事件</div>
+      <div class="op-hint">拖拽旋转 · 滚轮缩放 · 点击建筑聚焦查看</div>
       <!-- 点击建筑后显示该区域 D3 事件详情 -->
       <div id="d3-info" class="d3-info" style="display:none"></div>
     </section>
@@ -427,6 +441,34 @@
       const d3ShellState = {};    // zone → null | 'OPEN' | 'HANDLING'
       const d5Shells = {};        // zone → D5 规则/ML 不一致黄色闪烁提醒壳
       const d5ShellState = {};    // zone → 是否不一致（true 时黄闪）
+
+      // ============ E1 地图/3D 数字空间增强 ============
+      // 建筑横向位置（从 initScene 提取到模块级，供相机聚焦使用）
+      const POS = { 'zone-n': -14, 'zone-s': 0, 'zone-w': 14 };
+      // 建筑外框：环境正常绿框 / 环境异常红框 / D3 处理中黄闪 / 已恢复平滑渐变回正常色
+      const OUTLINE_NORMAL = 0x22c55e;
+      const OUTLINE_ABNORMAL = 0xef4444;
+      const OUTLINE_HANDLING = 0xffd600;
+      // THREE CDN 加载失败时置 null（仅在 3D 渲染路径使用，不阻塞 MQTT 面板）
+      const OUTLINE_HANDLING_COL = window.THREE ? new THREE.Color(OUTLINE_HANDLING) : null;
+      const OUTLINE_HANDLING_LIGHT = window.THREE ? new THREE.Color(0xfff3b0) : null;
+      const OUTLINE_WAIT = 0x9ca3af;
+      const OUTLINE_RECOVER_MS = 1200; // 恢复渐变时长
+      // 人流密度光圈：crowdLevel 越大，光圈尺寸越大、闪烁越快
+      const CROWD_RING_COLORS = { 0: 0x90a4ae, 1: 0x66bb6a, 2: 0xfb8c00, 3: 0xe53935 };
+      const RING_INNER = { 'zone-n': 4.6, 'zone-s': 5.8, 'zone-w': 5.8 };
+      const RING_THICK = 0.55;
+      const outlines = {};     // zone → { mesh, color, targetColor, recover }
+      const crowdRings = {};   // zone → { mesh, level, cur, target }
+      const glowSprites = {};  // zone → D2 优先关注发光光晕（加色混合）
+      // 相机聚焦：点击建筑平滑移动镜头（轨道参数在 animate 中插值）
+      const focusFrom = window.THREE ? new THREE.Vector3() : null;
+      const focusTo = window.THREE ? new THREE.Vector3() : null;
+      let focusT = 1;
+      let focusFromRadius = 34;
+      let focusToRadius = 34;
+      let lastFrame = performance.now();
+      let infoZone = null;     // 当前悬浮信息面板对应区域（面板打开期间随报文实时刷新）
       let d3InfoTimer = null;
       let priorityZone = null;    // 当前优先关注区域
       const SHELL_SIZES = {
@@ -521,7 +563,6 @@
         scene.fog = new THREE.Fog(0xe3eef7, 80, 160);
 
         // 三个特色建筑：左宿舍区、中教学区、右食堂区；顶部为 2D 文字标签
-        const POS = { 'zone-n': -14, 'zone-s': 0, 'zone-w': 14 };
         const LABEL_Y = { 'zone-n': 6.8, 'zone-s': 14.4, 'zone-w': 8.9 };
         const BUILDERS = { 'zone-n': buildDormitory, 'zone-s': buildTeaching, 'zone-w': buildCanteen };
         ZONE_IDS.forEach(function (z) {
@@ -567,6 +608,48 @@
           scene.add(d5Shell);
           d5Shells[z] = d5Shell;
           d5ShellState[z] = false;
+
+          // E1 建筑外框（包围盒线框）：正常绿 / 异常红 / HANDLING 黄闪 / 恢复平滑渐变
+          const outlineMesh = new THREE.LineSegments(
+            new THREE.EdgesGeometry(new THREE.BoxGeometry(
+              SHELL_SIZES[z][0] * 1.02, SHELL_SIZES[z][1] * 1.02, SHELL_SIZES[z][2] * 1.02)),
+            new THREE.LineBasicMaterial({ color: OUTLINE_WAIT, transparent: true, opacity: 0.85 })
+          );
+          outlineMesh.position.set(POS[z], SHELL_SIZES[z][1] / 2, 0);
+          scene.add(outlineMesh);
+          outlines[z] = {
+            mesh: outlineMesh,
+            color: new THREE.Color(OUTLINE_WAIT),
+            targetColor: new THREE.Color(OUTLINE_WAIT),
+            recover: null,
+          };
+
+          // E1 人流密度光圈（地面环形）：crowdLevel 越大尺寸越大、闪烁越快
+          const ringMesh = new THREE.Mesh(
+            new THREE.RingGeometry(RING_INNER[z], RING_INNER[z] + RING_THICK, 48),
+            new THREE.MeshBasicMaterial({
+              color: 0x90a4ae, transparent: true, opacity: 0,
+              side: THREE.DoubleSide, depthWrite: false,
+            })
+          );
+          ringMesh.rotation.x = -Math.PI / 2;
+          ringMesh.position.set(POS[z], 0.03, 0);
+          scene.add(ringMesh);
+          crowdRings[z] = { mesh: ringMesh, level: null, cur: 1, target: 1 };
+
+          // E1 D2 优先关注发光光晕（加色混合脉冲，叠加在原有高亮壳之上）
+          const glowSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: makeGlowTexture(),
+            color: 0xef4444,
+            blending: THREE.AdditiveBlending,
+            transparent: true,
+            opacity: 0,
+            depthWrite: false,
+          }));
+          glowSprite.scale.set(13, 13, 1);
+          glowSprite.position.set(POS[z], SHELL_SIZES[z][1] + 2.5, 0);
+          scene.add(glowSprite);
+          glowSprites[z] = glowSprite;
         });
 
         // 自定义简单控制器：拖拽旋转 + 滚轮缩放
@@ -603,6 +686,7 @@
           for (let i = 0; i < ZONE_IDS.length; i++) {
             const z = ZONE_IDS[i];
             if (ray.intersectObject(buildings[z].group, true).length > 0) {
+              focusCameraOn(z); // E1：相机平滑移动聚焦到该建筑
               d3ShowEventInfo(z);
               return;
             }
@@ -681,7 +765,44 @@
               eff ? (STATUS_ACCENT[eff.status] || WAIT_ACCENT) : WAIT_ACCENT
             );
           }
+          // E1 外框目标色：正常绿 / 异常红 / 无数据或离线灰（黄闪与恢复渐变在 animate 中处理）
+          outlines[z].targetColor.set(
+            eff ? (eff.status === '正常' ? OUTLINE_NORMAL : OUTLINE_ABNORMAL) : OUTLINE_WAIT
+          );
+          // E1 人流光圈：等级越大尺寸越大、闪烁越快；无数据或离线隐藏
+          const lv = eff ? Math.min(3, Math.max(0, Number(eff.crowdLevel) || 0)) : null;
+          crowdRings[z].level = lv;
+          crowdRings[z].target = lv === null ? 1 : 1 + lv * 0.25;
+          if (lv !== null) crowdRings[z].mesh.material.color.set(CROWD_RING_COLORS[lv]);
         });
+      }
+
+      // ============ E1：相机聚焦 / 外框恢复渐变 ============
+      // 点击建筑：相机平滑移动并聚焦到该建筑（轨道参数在 animate 中插值）
+      function focusCameraOn(zone) {
+        focusFrom.copy(TARGET);
+        focusTo.set(POS[zone], SHELL_SIZES[zone][1] / 2, 0);
+        focusFromRadius = radius;
+        focusToRadius = 18;
+        lastFrame = performance.now();
+        focusT = 0;
+      }
+
+      // 回到全景视角（悬浮面板按钮）
+      function resetCameraFocus() {
+        focusFrom.copy(TARGET);
+        focusTo.set(0, 3, 0);
+        focusFromRadius = radius;
+        focusToRadius = 34;
+        lastFrame = performance.now();
+        focusT = 0;
+      }
+
+      // D3 已恢复：外框从处理中黄色平滑渐变回正常色（缓动 1.2 秒）
+      function startOutlineRecover(zone) {
+        const o = outlines[zone];
+        if (!o) return;
+        o.recover = { start: performance.now(), from: new THREE.Color(OUTLINE_HANDLING) };
       }
 
       // ============ 墙体贴图（Canvas 生成窗户网格，随状态重绘换色） ============
@@ -788,6 +909,23 @@
       }
 
       // ============ 地面风险热力光斑（径向渐变，用热力图表达风险与状态） ============
+      function makeGlowTexture() {
+        // 径向渐变白晕贴图，配合加色混合实现 D2 优先关注发光效果
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 256;
+        const ctx = canvas.getContext('2d');
+        const g = ctx.createRadialGradient(128, 128, 8, 128, 128, 122);
+        g.addColorStop(0, 'rgba(255,255,255,0.95)');
+        g.addColorStop(0.4, 'rgba(255,255,255,0.35)');
+        g.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, 256, 256);
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.minFilter = THREE.LinearFilter;
+        return texture;
+      }
+
       function rgba(hex, a) {
         const n = parseInt(hex.slice(1), 16);
         return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
@@ -980,6 +1118,7 @@
                 ' 次正常报文' + (ev.crowdAnomaly ? ' 且人流等级 ≤1' : '') + '，事件恢复';
               d3History.push(ev);
               d3Events[zone] = null;
+              startOutlineRecover(zone); // E1：外框平滑渐变回正常颜色
             }
           }
         } catch (e) {
@@ -1043,31 +1182,58 @@
         }).join('');
       }
 
-      // 点击建筑：弹出该区域 D3 事件详情（8 秒后自动关闭）
-      function d3ShowEventInfo(zone) {
+      // 悬浮信息面板内容（E1：实时 PM2.5 / CO₂ / 人流密度 / D5 判定结论 + 原有 D3 事件详情）
+      function buildInfoHtml(zone) {
+        const d = zoneState[zone];
+        const s = d5State[zone];
         const ev = d3Events[zone];
         const hist = d3History.filter(function (e) { return e.zoneId === zone; });
         const last = hist.length ? hist[hist.length - 1] : null;
-        let html;
+        const d5Line = (!s || s.pm25Hist.length === 0)
+          ? '数据积累中（0/' + D5_MIN_SAMPLES + '）'
+          : ('规则' + (s.rule === '环境异常' ? '异常' : '正常') + ' ｜ ML ' + s.ml +
+             (s.pmThr !== null ? '（阈值 pm25 ' + s.pmThr + ' / co2 ' + s.co2Thr + '）' : '') +
+             (s.mismatch ? ' ｜ ⚠不一致·建议人工复核' : ' ｜ 一致'));
+        let d3Line;
         if (ev) {
-          const stText = ev.currentState === D3_STATE.OPEN ? 'OPEN 待处理' : 'HANDLING 处理中';
-          html = '<b>' + ZONES[zone].name + '（' + zone + '）</b> ' + stText +
-            '<br>事件：' + ev.event_id +
-            '<br>异常：' + ev.anomalyDesc +
+          d3Line = (ev.currentState === D3_STATE.OPEN ? 'OPEN 待处理' : 'HANDLING 处理中') +
+            ' · ' + ev.event_id +
             (ev.currentState === D3_STATE.HANDLING
-              ? '<br>处置：' + (ev.userAction || '—') + ' · 连续正常 ' + ev.normalStreak + '/' + D3_RECOVER_STREAK +
-                (ev.reviewFlag ? ' · 需人工复核' : '')
-              : '<br>等待人工干预（干预按钮在总视图 D3 面板）');
+              ? ' · 处置：' + (ev.userAction || '—') + ' · 连续正常 ' + ev.normalStreak + '/' + D3_RECOVER_STREAK
+              : ' · 等待人工干预（干预按钮在总视图 D3 面板）');
         } else if (last) {
-          html = '<b>' + ZONES[zone].name + '（' + zone + '）</b> RECOVERED 已恢复<br>' + (last.finalResult || '');
+          d3Line = 'RECOVERED 已恢复 · ' + (last.finalResult || '');
         } else {
-          html = '<b>' + ZONES[zone].name + '（' + zone + '）</b> 无事件，状态正常';
+          d3Line = '无事件';
         }
+        return '<b class="zname">' + ZONES[zone].name + '（' + zone + '）</b>' +
+          '<div class="info-row">实时 PM2.5：<b>' + (d ? fmt(d.pm25) : '--') + ' μg/m³</b>' +
+          ' ｜ CO₂：<b>' + (d ? fmt(d.co2) : '--') + ' ppm</b></div>' +
+          '<div class="info-row">人流密度：<b>' + (d ? crowdText(d.crowdLevel) + '（L' + d.crowdLevel + '）' : '--') + '</b>' +
+          ' ｜ 状态：<b>' + (d ? d.status : '暂无数据') + '</b></div>' +
+          '<div class="info-row">D5 判定：' + d5Line + '</div>' +
+          '<div class="info-row">D3 事件：' + d3Line + '</div>' +
+          '<button id="btn-focus-reset" class="focus-reset" type="button">回到全景视角</button>';
+      }
+
+      // 点击建筑：弹出悬浮信息面板（8 秒后自动关闭，面板打开期间随报文实时刷新）
+      function d3ShowEventInfo(zone) {
+        infoZone = zone;
         const $d3Info = document.getElementById('d3-info');
-        $d3Info.innerHTML = html;
+        $d3Info.innerHTML = buildInfoHtml(zone);
         $d3Info.style.display = 'block';
         clearTimeout(d3InfoTimer);
-        d3InfoTimer = setTimeout(function () { $d3Info.style.display = 'none'; }, 8000);
+        d3InfoTimer = setTimeout(function () {
+          $d3Info.style.display = 'none';
+          infoZone = null;
+        }, 8000);
+      }
+
+      // 面板打开期间随 MQTT 新报文实时刷新内容（页面不刷新）
+      function refreshInfoPanel() {
+        if (!infoZone) return;
+        const $d3Info = document.getElementById('d3-info');
+        if ($d3Info.style.display !== 'none') $d3Info.innerHTML = buildInfoHtml(infoZone);
       }
 
       // ============ D4：链路状态面板 / 定时在线判定 / 手动重连 ============
@@ -1106,6 +1272,7 @@
           renderD2Panel();    // 离线节点退出优先关注
         }
         renderD4Panel();
+        refreshInfoPanel();   // 离线状态变化同步到悬浮面板
       }
 
       // 手动重连：断开当前连接后由 mqtt.js 自动重建
@@ -1381,6 +1548,7 @@
 
       function animate() {
         requestAnimationFrame(animate);
+        const now = performance.now();
         // D2 优先关注建筑高亮壳：轻微闪烁（透明度正弦波动）
         ZONE_IDS.forEach(function (z) {
           const shell = highlightShells[z];
@@ -1416,6 +1584,62 @@
             shell.material.opacity = 0;
           }
         });
+        // E1 建筑外框：HANDLING 黄色闪烁；恢复中平滑渐变回目标色；其余显示目标色
+        ZONE_IDS.forEach(function (z) {
+          const o = outlines[z];
+          if (!o) return;
+          if (d3ShellState[z] === D3_STATE.HANDLING) {
+            o.recover = null;
+            const k = 0.5 + 0.5 * Math.sin(now * 0.008);
+            o.color.copy(OUTLINE_HANDLING_COL).lerp(OUTLINE_HANDLING_LIGHT, k);
+            o.mesh.material.opacity = 0.55 + 0.45 * k;
+          } else if (o.recover) {
+            const p = Math.min(1, (now - o.recover.start) / OUTLINE_RECOVER_MS);
+            const e = p * p * (3 - 2 * p); // smoothstep 缓动
+            o.color.lerpColors(o.recover.from, o.targetColor, e);
+            o.mesh.material.opacity = 0.85;
+            if (p >= 1) o.recover = null;
+          } else {
+            o.color.copy(o.targetColor);
+            o.mesh.material.opacity = 0.85;
+          }
+          o.mesh.material.color.copy(o.color);
+        });
+        // E1 人流密度光圈：尺寸平滑跟随等级，闪烁速度随等级加快；无数据淡出
+        ZONE_IDS.forEach(function (z) {
+          const r = crowdRings[z];
+          if (!r) return;
+          if (r.level === null) {
+            r.mesh.material.opacity = Math.max(0, r.mesh.material.opacity - 0.06);
+            return;
+          }
+          r.cur += (r.target - r.cur) * 0.12;
+          r.mesh.scale.setScalar(r.cur);
+          const freq = 1.2 + r.level * 2.2; // rad/s：crowdLevel 越大闪烁越快
+          r.mesh.material.opacity = 0.35 + 0.3 * (0.5 + 0.5 * Math.sin(now * 0.001 * freq));
+        });
+        // E1 D2 优先关注：发光光晕脉冲（叠加在原有高亮壳之上）
+        ZONE_IDS.forEach(function (z) {
+          const g = glowSprites[z];
+          if (!g) return;
+          if (priorityZone === z && d4Online[z]) {
+            g.visible = true;
+            const k = 0.5 + 0.5 * Math.sin(now * 0.005);
+            g.material.opacity = 0.35 + 0.3 * k;
+            g.scale.set(13 + 3 * k, 13 + 3 * k, 1);
+          } else {
+            g.visible = false;
+            g.material.opacity = 0;
+          }
+        });
+        // E1 相机聚焦插值：点击建筑后平滑移动镜头
+        if (focusT < 1) {
+          focusT = Math.min(1, focusT + (now - lastFrame) / 900);
+          const e = focusT * focusT * (3 - 2 * focusT);
+          TARGET.lerpVectors(focusFrom, focusTo, e);
+          radius = focusFromRadius + (focusToRadius - focusFromRadius) * e;
+          lastFrame = now;
+        }
         camera.position.set(
           TARGET.x + radius * Math.sin(phi) * Math.sin(theta),
           TARGET.y + radius * Math.cos(phi),
@@ -1506,6 +1730,11 @@
           return;
         }
         d4LastSeen[zone] = new Date(); // 更新节点 lastSeen
+        // 收到有效报文即视为在线（无需等 1 秒巡检）：D2 优先关注高亮/发光在首条异常报文当刻生效
+        if (!d4Online[zone]) {
+          console.log('[AirGuard] D4 故障日志: [链路恢复] ' + ZONES[zone].name + ' 节点恢复上报数据');
+        }
+        d4Online[zone] = true;
 
         const status = calcStatus(payload.pm25, payload.co2);
         // 只更新对应 zone，绝不写入其他区域
@@ -1533,6 +1762,7 @@
         renderD3Panel();
         updateD2Markers();
         updateScene();
+        refreshInfoPanel(); // 悬浮面板打开期间随报文实时刷新
       }
 
       // ============ MQTT 连接 ============
@@ -1584,6 +1814,10 @@
       // D4：每秒巡检节点在线状态；手动重连按钮
       setInterval(d4Tick, 1000);
       document.getElementById('btn-reconnect').addEventListener('click', d4ManualReconnect);
+      // E1：悬浮面板「回到全景视角」按钮（innerHTML 重建后事件委托仍生效）
+      document.getElementById('d3-info').addEventListener('click', function (e) {
+        if (e.target && e.target.id === 'btn-focus-reset') resetCameraFocus();
+      });
 
       renderPanel(); // 初始：三区域均为「暂无实时数据」，建筑墙体灰色
       renderD2Panel(); // 初始：无优先关注区域
