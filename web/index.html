@@ -1264,7 +1264,8 @@
             ? '<p class="d3-empty">暂无历史数据</p>'
             : '<table class="d5-hist"><tr><th>序号</th><th>PM2.5</th><th>CO₂</th></tr>' +
               s.pm25Hist.slice(-10).map(function (v, i) {
-                const idx = s.pm25Hist.length - 10 + i;
+                // 序号从 1 开始：显示的条数 = min(10, 历史长度)
+                const idx = s.pm25Hist.length - Math.min(10, s.pm25Hist.length) + i;
                 return '<tr><td>' + (idx + 1) + '</td><td>' + v + '</td><td>' + s.co2Hist[idx] + '</td></tr>';
               }).join('') + '</table>';
           return '<div class="d5-card">' +

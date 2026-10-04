@@ -10,6 +10,7 @@
 #   python sensor_sim.py case2      # D2 用例2：zone-s 重度污染，zone-w 轻度污染
 #   python sensor_sim.py case3      # D2 用例3：全部正常（无优先关注区域）
 #   python sensor_sim.py d3         # D3 剧本：zone-w 异常→改善→正常×2 完整事件链路（自动递增时间戳）
+#   python sensor_sim.py clear      # 清除三个区域主题的保留消息（页面刷新后回到「暂无数据」）
 import json
 import random
 import sys
@@ -79,8 +80,8 @@ def build_payload(zone, pm25, co2, crowd_level):
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "normal"
-    if mode != "d3" and mode not in SCENARIOS:
-        print("用法: python sensor_sim.py [normal|case1|case2|case3|d3]")
+    if mode != "d3" and mode != "clear" and mode not in SCENARIOS:
+        print("用法: python sensor_sim.py [normal|case1|case2|case3|d3|clear]")
         sys.exit(1)
     base = SCENARIOS.get(mode, SCENARIOS["normal"])
 
@@ -92,6 +93,16 @@ def main():
 
     client.connect(BROKER_HOST, BROKER_PORT, 60)
     client.loop_start()
+
+    # clear 模式：向三个区域主题发布空消息（retain），清除保留数据后退出
+    if mode == "clear":
+        for zone in ("zone-n", "zone-s", "zone-w"):
+            client.publish(TOPIC.format(zone=zone), "", qos=0, retain=True)
+            print("[sensor_sim] 已清除保留消息:", TOPIC.format(zone=zone))
+        client.disconnect()
+        print("[sensor_sim] 清除完成，页面刷新后显示「暂无数据」")
+        return
+
     print("[sensor_sim] 场景=%s broker=%s:%s 周期=%ss retain=True" %
           (mode, BROKER_HOST, BROKER_PORT, INTERVAL))
 
