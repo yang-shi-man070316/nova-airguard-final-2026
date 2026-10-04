@@ -3,6 +3,8 @@
 # 运行期间自动记录所有已发布报文到 sensor_records.csv（每次运行覆盖上一份）；
 # 按 Ctrl+C 停止时，自动执行 D5 双判定（固定规则 + ML 统计动态阈值），
 # 生成静态报告 web/ml-report.html（每次停止都替换成本次运行的新数据）。
+# 报告内含「案例分析」板块：自动保留至少 1 个规则/ML 差异案例并说明可能原因
+# （历史数据太少 / 历史数据太单一 / 历史本身包含异常 / 当前环境模式已变化，任务书 D5 案例留存要求）。
 #
 # 用法：
 #   pip install paho-mqtt
@@ -140,6 +142,15 @@ h1 { font-size: 18px; color: #fff; margin: 0; }
 .dirty-log li { padding: 4px 8px; border-bottom: 1px dashed #e5e7eb; color: #b45309; }
 .dirty-log li.empty { color: #6b7280; }
 .line-no { font-family: Consolas, monospace; color: #6b7280; margin-right: 8px; }
+.case-list { display: grid; gap: 10px; }
+.case-item { border: 1px solid #e5e7eb; border-left: 4px solid #f59e0b; border-radius: 8px; padding: 10px 12px; background: #fffbeb; }
+.case-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.case-head b { font-size: 13px; }
+.case-tag { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #f59e0b; color: #fff; white-space: nowrap; }
+.case-seq { font-size: 12px; color: #6b7280; margin-left: auto; }
+.case-row { font-size: 12.5px; color: #374151; line-height: 1.6; }
+.case-row.cause { color: #92400e; }
+.case-empty { font-size: 13px; color: #6b7280; padding: 4px 0; }
 footer { text-align: center; color: #9ca3af; font-size: 12px; margin-top: 24px; }
 """
 
@@ -150,6 +161,37 @@ def _mean_std(vals):
     mean = sum(vals) / n
     var = sum((v - mean) ** 2 for v in vals) / (n - 1)
     return mean, math.sqrt(var)
+
+
+def _case_tag(v):
+    """案例条目差异类型标签（任务书 D5 案例留存）"""
+    if v["ml"] == "数据积累中":
+        return "ML 数据积累中（需继续积累）"
+    ml_ab = v["ml"] == "与历史明显不同"
+    rule_ab = v["rule"] == "环境异常"
+    if rule_ab != ml_ab:
+        return "规则/ML 判断不一致"
+    return "两者一致（原因可解释）"
+
+
+def _explain_case(v):
+    """为一条判定自动匹配任务书 D5 的可能原因之一"""
+    if v["ml"] == "数据积累中":
+        return ("历史数据太少：该区域截至本条仅 %d 条有效记录（不足 %d 条），ML 尚无法建立统计基线，"
+                "本条由固定规则独立裁决，建议继续积累数据后复核。" % (v["seq"], D5_MIN_SAMPLES))
+    ml_ab = v["ml"] == "与历史明显不同"
+    rule_ab = v["rule"] == "环境异常"
+    if rule_ab and not ml_ab:
+        return ("历史数据太单一 / 历史本身包含异常：该区域历史值长期贴近甚至略超规则限值，"
+                "ML 学到的「常态」已包含异常，动态阈值（pm25 %s / co2 %s）随之失真；"
+                "固定规则兜底报警，体现规则优先裁决的必要性。" % (v["pthr"], v["cthr"]))
+    if ml_ab and not rule_ab:
+        return ("当前环境模式已经变化：当前值显著高于历史基线（动态阈值 pm25 %s / co2 %s），"
+                "但尚未触及固定限值（pm25>75 或 co2>1000），固定规则不报警，ML 捕捉到了相对偏离，"
+                "建议人工核查是否有新增污染源或季节变化。" % (v["pthr"], v["cthr"]))
+    if rule_ab and ml_ab:
+        return "两者一致且原因清楚：当前值既超过固定限值、又显著偏离历史基线，规则与 ML 交叉确认，异常置信度高。"
+    return "两者一致且原因清楚：当前值在固定限值与历史动态阈值之内，历史覆盖充分、常态未变，两套判定均维持正常。"
 
 
 def generate_d5_report(csv_path, out_path):
@@ -208,6 +250,7 @@ def generate_d5_report(csv_path, out_path):
     # ---- D5 双判定（固定规则 + ML 统计动态阈值，规则优先裁决） ----
     cards_html = []
     tables_html = []
+    cases = []  # 案例留存条目：(zone_cn, zone, tag, verdict, cause)
     total_valid = 0
     span_min = span_max = None
 
@@ -287,6 +330,32 @@ def generate_d5_report(csv_path, out_path):
                 '<th>CO₂</th><th>固定规则</th><th>ML判定</th><th>一致性</th></tr>%s</table></div>'
                 % (ZONE_CN[zone], zone, len(verdicts), rows_html))
 
+            # 案例留存：优先保留「不一致」条目（最近 3 条）；无不一致时保留最近 1 条「一致但可解释」
+            zone_cases = [v for v in verdicts if v["mismatch"]] or [verdicts[-1]]
+            for v in zone_cases[-3:]:
+                cases.append((ZONE_CN[zone], zone, _case_tag(v), v, _explain_case(v)))
+
+    # ---- 案例分析板块（任务书 D5：至少保留 1 个说明规则与 ML 差异的案例并说明可能原因）----
+    case_html_parts = []
+    for zone_cn, zone, tag, v, cause in cases[:6]:
+        case_html_parts.append(
+            '<div class="case-item">'
+            '<div class="case-head"><b>%s（%s）</b><span class="case-tag">%s</span>'
+            '<span class="case-seq">第 %d 条 · %s</span></div>'
+            '<div class="case-row">数据 pm25=%s / co2=%s ｜ 固定规则：%s ｜ ML：%s'
+            '（动态阈值 pm25 %s / co2 %s）｜ 裁决：规则优先 → %s%s</div>'
+            '<div class="case-row cause">可能原因：%s</div></div>'
+            % (zone_cn, zone, tag, v["seq"], v["time"],
+               v["pm25"], v["co2"], v["rule"], v["ml"],
+               v["pthr"] if v["pthr"] is not None else "—",
+               v["cthr"] if v["cthr"] is not None else "—",
+               "环境异常，按异常处置" if v["rule"] == "环境异常" else "正常，维持常规监测",
+               "（两套结论不一致，建议人工复核）" if v["mismatch"] else "",
+               cause))
+    cases_html = ("".join(case_html_parts)
+                  if case_html_parts
+                  else '<div class="case-empty">暂无有效数据，无法形成案例。运行 sensor_sim 并 Ctrl+C 停止后自动生成。</div>')
+
     dirty_html = ("".join(
         '<li><span class="line-no">行 %d</span>%s：%s</li>' % (ln, ZONE_CN.get(zone, "区域[" + zone + "]"), reason)
         for ln, zone, reason in dirty)
@@ -316,6 +385,14 @@ def generate_d5_report(csv_path, out_path):
 </div>
 
 <div class="panel">
+  <div class="panel-head">
+    <h2>案例分析：规则 vs ML 判断依据差异（本次保留 {case_n} 例）</h2>
+    <span class="meta">任务书 D5：每份报告至少保留 1 个说明规则与 ML 差异的案例并说明可能原因；优先保留不一致案例，无不一致时保留「一致但可解释」案例</span>
+  </div>
+  <div class="case-list">{case_list}</div>
+</div>
+
+<div class="panel">
   <div class="panel-head"><h2>历史数据表格（含逐条判定，最多显示最近 100 条）</h2></div>
   {tables}
 </div>
@@ -338,6 +415,8 @@ def generate_d5_report(csv_path, out_path):
         cards="".join(cards_html),
         tables="".join(tables_html),
         dirty_list=dirty_html,
+        case_n=min(len(cases), 6),
+        case_list=cases_html,
     )
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
