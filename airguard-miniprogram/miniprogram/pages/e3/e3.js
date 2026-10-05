@@ -70,6 +70,8 @@ Page({
     },
     events: [],
     onlineText: '在线 0/3',
+    msgCount: 0,      // 自诊断：页面累计收到的消息数
+    lastTopic: '—',   // 自诊断：最近收到的主题
   },
 
   onLoad: function () {
@@ -80,6 +82,7 @@ Page({
     this.d3Events = {};  // zone → {state:'OPEN'|'HANDLING', desc, action, normalStreak}
     this.d3History = []; // 已恢复事件
     this.lastSeen = {};  // zone → Date
+    this.userPicked = false; // 用户是否手动选过区域（未选过时自动跟随有数据的区域）
     ZONE_IDS.forEach(function (z) {
       self.zoneState[z] = null;
       self.d5State[z] = { pm25Hist: [], co2Hist: [], rule: '—', ml: '—', mismatch: false };
@@ -87,24 +90,28 @@ Page({
       self.lastSeen[z] = null;
     });
 
-    this.client = app.globalData.mqtt; // 全局单例连接（共享 1 个 WebSocket）
+    try {
+      this.client = app.globalData.mqtt; // 全局单例连接（共享 1 个 WebSocket）
 
-    // 消息处理器（onUnload 时注销；连接与订阅由 app.js 统一管理）
-    this._onMsg = function (topic, payload) {
-      self.handleMsg(topic, payload);
-    };
-    this.client.on('message', this._onMsg);
+      // 消息处理器（onUnload 时注销；连接与订阅由 app.js 统一管理）
+      this._onMsg = function (topic, payload) {
+        self.handleMsg(topic, payload);
+      };
+      this.client.on('message', this._onMsg);
 
-    // 连接状态跟随全局单例
-    this._onConn = function () {
-      const st = app.globalData.connState;
-      self.setData({
-        connText: app.globalData.connText,
-        connClass: st === 'on' ? 'ok' : (st === 'off' ? 'err' : ''),
-      });
-    };
-    app.onConnChange(this._onConn);
-    this._onConn();
+      // 连接状态跟随全局单例
+      this._onConn = function () {
+        const st = app.globalData.connState;
+        self.setData({
+          connText: app.globalData.connText,
+          connClass: st === 'on' ? 'ok' : (st === 'off' ? 'err' : ''),
+        });
+      };
+      app.onConnChange(this._onConn);
+      this._onConn();
+    } catch (e) {
+      console.error('[AirGuard][E3] 页面初始化失败:', e);
+    }
 
     // 每秒巡检：节点在线/离线与 lastSeen（与 Web D4 阈值一致）
     this.timer = setInterval(function () { self.renderAll(); }, 1000);
@@ -120,6 +127,8 @@ Page({
 
   // ---------- 消息分流 ----------
   handleMsg: function (topic, payload) {
+    console.log('[AirGuard][E3] 收到消息:', topic); // 诊断日志：确认页面确实收到共享连接的消息
+    this.setData({ msgCount: this.data.msgCount + 1, lastTopic: topic }); // 页面自诊断计数
     if (topic.indexOf('airguard/e3/') === 0) { this.handleE3(topic, payload); return; }
     if (topic.indexOf('/action') > -1) { this.handleAction(topic, payload); return; }
     this.handleEnv(topic, payload);
@@ -141,6 +150,12 @@ Page({
       crowdText: CROWD_TEXT[crowd] !== undefined ? CROWD_TEXT[crowd] : '--',
       time: msg.time, statusText: statusText, accent: STATUS_ACCENT[statusText] || '#9ca3af',
     };
+    console.log('[AirGuard][E3] 环境数据更新:', z, 'pm25=' + pm25, 'co2=' + co2, 'crowd=' + crowd);
+
+    // 未手动选过区域时，自动跟随第一条有数据的区域（页面打开即有可见反应）
+    if (!this.userPicked && this.data.selected !== z && !this.zoneState[this.data.selected]) {
+      this.setData({ selected: z });
+    }
 
     // ---- D5 双判定（固定规则 + ML 统计动态阈值，与 Web 端一致）----
     const s = this.d5State[z];
@@ -222,6 +237,7 @@ Page({
   onSelectZone: function (e) {
     const z = e.currentTarget.dataset.zone;
     if (ZONE_IDS.indexOf(z) < 0) return;
+    this.userPicked = true; // 手动选择后不再自动跟随
     this.setData({ selected: z });
     this.publish('airguard/e3/focus', JSON.stringify({ zoneId: z, time: nowStr() }));
     this.renderAll();

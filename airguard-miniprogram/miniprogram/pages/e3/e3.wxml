@@ -73,5 +73,8 @@
     <view wx:if="{{events.length === 0}}" class="ev-empty">暂无事件记录</view>
   </view>
 
-  <view class="footer">数据来源：同一 MQTT Broker · 与 Web 监测台数据同源 · 状态同一套规则生成</view>
+  <!-- 自诊断行：连接状态 + 收消息计数 + 最近主题（排查页面无反应用） -->
+  <view class="diag-line">诊断：{{connText}} · 已收消息 {{msgCount}} 条 · 最近主题 {{lastTopic}}</view>
+
+  <view class="footer">数据来源：同一 MQTT Broker · E3 v2（共享连接）</view>
 </view>

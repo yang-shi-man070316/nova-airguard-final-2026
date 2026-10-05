@@ -102,7 +102,7 @@ class MqttClient {
     this.connected = false;
     this.ended = false;
     this.packetId = 1;
-    this.pendingTopics = []; // CONNACK 之前排队等待订阅的主题
+    this.subscribedTopics = []; // 已订阅主题清单：CONNACK 后统一发送，断线重连后自动重新订阅
     this.recvBuf = new Uint8Array(0);
     this.task = null;
     this.pingTimer = null;
@@ -169,13 +169,16 @@ class MqttClient {
     }
   }
 
-  // 订阅主题：连接未完成时先排队，CONNACK 后统一发送
+  // 订阅主题：记录到清单；已连接立即发送，未连接等待 CONNACK 后统一发送。
+  // 关键：socket 断开自动重连后，CONNACK 会按清单重新订阅
+  // （clean session 模式下 broker 不保留订阅，不重发会收不到任何消息）
   subscribe(topic) {
+    if (this.subscribedTopics.indexOf(topic) === -1) this.subscribedTopics.push(topic);
     if (this.connected) this.sendSubscribe(topic);
-    else this.pendingTopics.push(topic);
   }
 
   sendSubscribe(topic) {
+    if (!this.task || !this.connected) return;
     const pkt = buildSubscribePacket(this.packetId++, topic);
     this.task.send({ data: new Uint8Array(pkt).buffer });
   }
@@ -239,11 +242,11 @@ class MqttClient {
 
   handlePacket(type, bytes, start, end) {
     if (type === 2) {
-      // CONNACK：握手完成，发送排队等待的订阅
+      // CONNACK：握手完成（含断线重连后的新握手），重新发送全部已订阅主题
       const self = this;
       this.connected = true;
       this.startPing();
-      const topics = this.pendingTopics.splice(0);
+      const topics = this.subscribedTopics.slice();
       topics.forEach(function (t) { self.sendSubscribe(t); });
       this.emit('connect');
     } else if (type === 3) {

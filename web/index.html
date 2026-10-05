@@ -652,7 +652,7 @@
             <button id="e2-tts-btn" class="e2-btn" type="button">朗读当前区域状态</button>
           </div>
           <span id="e2-tts-msg" class="e2-hint"></span>
-          <p class="e2-hint">支持指令：「查看 zone-w」→ 切换选中区域；「记录现场」→ 拍照存档并播报感知结论。识别自动续听，再次点击停止。</p>
+          <p class="e2-hint">支持指令：「查看 zone-n / zone-s / zone-w」「查看 宿舍区 / 教学区 / 食堂区」「查看 w 区」→ 切换选中区域；「记录现场」→ 拍照存档并播报感知结论。识别自动续听，再次点击停止。</p>
         </div>
         <div class="e2-card">
           <div class="e2-card-title">📷 Camera 现场记录<span class="e2-card-sub">WebRTC 原生摄像头</span></div>
@@ -1918,18 +1918,35 @@
       }
 
       // 业务指令解析（至少 2 条：查看区域 / 记录现场）
+      // 区域匹配做三归一 + 多说法：大小写/空格标点归一，ASR 谐音归一（总/棕/纵/zong→zone），
+      // 支持 zoneId（zone-w / zonew）、中文全名（食堂区）、中文简称（食堂）、尾字母简写（w 区）
       function e2ExecCommand(text) {
         const t = String(text || '').trim();
         if (!t) return;
-        // 指令 1：「查看 zone-w」/「切换到食堂区」→ 修改选中区域
-        const tN = t.replace(/[\s，。,.、]/g, ''); // 归一化：去掉空格与标点，兼容 ASR 空格误差
-        const zoneHit = ZONE_IDS.filter(function (z) {
-          return tN.indexOf(z) > -1 || tN.indexOf(z.replace('-', '')) > -1 || t.indexOf(ZONES[z].name) > -1;
-        })[0];
+        let tN = t.replace(/[\s，。,.、！？!?]/g, '').toLowerCase()
+          .replace(/zong/g, 'zone').replace(/总/g, 'zone').replace(/棕/g, 'zone').replace(/纵/g, 'zone');
+        // 指令 1：「查看 zone-w」/「切换到食堂区」→ 修改选中区域（三个区域全部支持）
+        let zoneHit = null;
+        ZONE_IDS.forEach(function (z) {
+          if (zoneHit) return;
+          const short = z.slice(-1);            // n / s / w
+          const name = ZONES[z].name;           // 宿舍区 / 教学区 / 食堂区
+          const nameShort = name.slice(0, -1);  // 宿舍 / 教学 / 食堂
+          if (tN.indexOf(z) > -1 ||
+              tN.indexOf(z.replace('-', '')) > -1 ||
+              tN.indexOf(name) > -1 ||
+              tN.indexOf(nameShort) > -1 ||
+              tN.indexOf(short + '区') > -1) {
+            zoneHit = z;
+          }
+        });
+        const hasVerb = /查看|切换|聚焦|关注|监控|选择|看看|看下|看一下|显示|打开|切到|进入|转到/.test(t);
         let feedback = '';
-        if (zoneHit && /查看|切换|聚焦|关注|监控|选择/.test(t)) {
+        if (zoneHit && hasVerb) {
           e2SelectZone(zoneHit);
-          feedback += '已切换选中区域到' + ZONES[zoneHit].name + '。';
+          feedback += '已切换选中区域到' + ZONES[zoneHit].name + '（' + zoneHit + '）。';
+        } else if (zoneHit) {
+          feedback += '已识别到区域' + ZONES[zoneHit].name + '，请说「查看 ' + ZONES[zoneHit].name + '」完成切换。';
         }
         // 指令 2：「记录现场」→ 拍照存档 + 写入事件日志 + TTS 播报感知结论
         const photoCmd = t.indexOf('记录现场') > -1;
@@ -1942,7 +1959,7 @@
           }
         }
         $e2AsrResult.textContent = '识别结果：' + t + ' ｜ 执行反馈：' +
-          (feedback || '未识别出有效指令（支持：「查看 zone-w」「记录现场」）');
+          (feedback || '未识别出有效指令（支持：「查看 zone-n / zone-s / zone-w」「查看 宿舍区/教学区/食堂区」「记录现场」）');
         if (feedback && !photoCmd) e2Speak(feedback);
       }
 

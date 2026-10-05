@@ -239,3 +239,15 @@
   color: #b0b8c4;
   padding-top: 8rpx;
 }
+
+/* ===== 自诊断行 ===== */
+.diag-line {
+  margin-top: 8rpx;
+  font-size: 22rpx;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 2rpx dashed #bfdbfe;
+  border-radius: 12rpx;
+  padding: 12rpx 20rpx;
+  text-align: center;
+}
