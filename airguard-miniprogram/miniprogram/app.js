@@ -11,6 +11,7 @@ App({
     mqtt: null,
     connState: '', // '' 连接中 | 'on' 已连接 | 'off' 断开
     connText: '连接中…',
+    e3State: null, // E3 巡检协同页跨页面状态：页面退出再进入不清零（见 pages/e3/e3.js onLoad）
   },
 
   onLaunch: function () {

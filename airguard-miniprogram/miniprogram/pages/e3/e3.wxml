@@ -54,12 +54,14 @@
     <view class="d5-line {{focus.mismatch ? 'conflict' : ''}}">
       D5 判定：规则{{focus.ruleText}} ｜ ML {{focus.mlText}}{{focus.mismatch ? ' ｜ ⚠不一致' : ''}}
     </view>
+    <view wx:if="{{!focus.hasData}}" class="no-data-hint">该区域暂无数据，等待 MQTT 环境报文…</view>
     <view class="node-line">
       节点：{{focus.online ? '在线' : '离线'}} · lastSeen {{focus.lastSeen}} · 事件：{{focus.eventDesc}}
     </view>
     <view class="btn-row">
-      <button class="op-btn handle" size="mini" disabled="{{focus.eventState !== 'OPEN'}}" bindtap="onMarkHandling">标记处理中</button>
-      <button class="op-btn recover" size="mini" disabled="{{focus.eventState !== 'HANDLING'}}" bindtap="onMarkRecovered">标记已恢复</button>
+      <!-- 不用 disabled：条件不满足时点击会弹出提示，避免「点了没反应」 -->
+      <button class="op-btn handle {{focus.eventState !== 'OPEN' ? 'off' : ''}}" size="mini" bindtap="onMarkHandling">标记处理中</button>
+      <button class="op-btn recover {{focus.eventState !== 'HANDLING' ? 'off' : ''}}" size="mini" bindtap="onMarkRecovered">标记已恢复</button>
     </view>
     <view class="clear-focus" bindtap="onClearFocus">恢复规则判定重点区域</view>
   </view>

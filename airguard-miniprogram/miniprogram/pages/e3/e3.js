@@ -5,6 +5,8 @@
 // 跨端指令：切换重点关注区域 → airguard/e3/focus；
 //          标记处理中 → airguard/{zone}/action（复用现有干预协议）；
 //          标记已恢复 → airguard/e3/event。
+// 页面状态（zoneState / d5State / d3Events / d3History / 选中区域）挂在
+// app.globalData.e3State：页面退出再进入自动恢复，内容不清零。
 // ============================================================
 
 // MQTT 连接由 app.js 全局单例提供（共享 1 个 WebSocket），本页只注册消息处理器
@@ -77,18 +79,33 @@ Page({
   onLoad: function () {
     const self = this;
     const app = getApp();
-    this.zoneState = {}; // zone → {pm25,co2,crowdLevel,crowdText,time,statusText,accent}
-    this.d5State = {};   // zone → {pm25Hist,co2Hist,rule,ml,mismatch}
-    this.d3Events = {};  // zone → {state:'OPEN'|'HANDLING', desc, action, normalStreak}
-    this.d3History = []; // 已恢复事件
-    this.lastSeen = {};  // zone → Date
-    this.userPicked = false; // 用户是否手动选过区域（未选过时自动跟随有数据的区域）
-    ZONE_IDS.forEach(function (z) {
-      self.zoneState[z] = null;
-      self.d5State[z] = { pm25Hist: [], co2Hist: [], rule: '—', ml: '—', mismatch: false };
-      self.d3Events[z] = null;
-      self.lastSeen[z] = null;
+
+    // 页面状态挂在 app.globalData.e3State：本页退出（onUnload 销毁页面实例）再进入时
+    // 恢复上次的判级 / D5 历史 / 事件 / 选中区域，内容不清零（仅报文与指令变化时更新）。
+    const st = app.globalData.e3State || (app.globalData.e3State = {
+      zoneState: {},   // zone → {pm25,co2,crowdLevel,crowdText,time,statusText,accent}
+      d5State: {},     // zone → {pm25Hist,co2Hist,rule,ml,mismatch}
+      d3Events: {},    // zone → {state:'OPEN'|'HANDLING', desc, action, normalStreak}
+      d3History: [],   // 已恢复事件
+      lastSeen: {},    // zone → Date
+      userPicked: false, // 用户是否手动选过区域（未选过时自动跟随有数据的区域）
+      selected: 'zone-w',
     });
+    this.zoneState = st.zoneState;
+    this.d5State = st.d5State;
+    this.d3Events = st.d3Events;
+    this.d3History = st.d3History;
+    this.lastSeen = st.lastSeen;
+    this.userPicked = !!st.userPicked;
+    ZONE_IDS.forEach(function (z) {
+      if (self.zoneState[z] === undefined) self.zoneState[z] = null;
+      if (!self.d5State[z]) self.d5State[z] = { pm25Hist: [], co2Hist: [], rule: '—', ml: '—', mismatch: false };
+      if (self.d3Events[z] === undefined) self.d3Events[z] = null;
+      if (self.lastSeen[z] === undefined) self.lastSeen[z] = null;
+    });
+    if (ZONE_IDS.indexOf(st.selected) > -1 && st.selected !== this.data.selected) {
+      this.setData({ selected: st.selected });
+    }
 
     try {
       this.client = app.globalData.mqtt; // 全局单例连接（共享 1 个 WebSocket）
@@ -137,7 +154,10 @@ Page({
   // 环境报文：更新区域数据 + D5 双判定 + D3 状态机（与 Web 同一套规则）
   handleEnv: function (topic, payload) {
     let msg;
-    try { msg = JSON.parse(payload); } catch (e) { return; }
+    try { msg = JSON.parse(payload); } catch (e) {
+      console.error('[AirGuard][E3] 环境报文解析失败:', e.message, '内容前120字符=', payload.slice(0, 120));
+      return;
+    }
     const z = msg.zoneId || msg.zoneid;
     if (ZONE_IDS.indexOf(z) < 0) return;
     const pm25 = Number(msg.pm25);
@@ -155,6 +175,7 @@ Page({
     // 未手动选过区域时，自动跟随第一条有数据的区域（页面打开即有可见反应）
     if (!this.userPicked && this.data.selected !== z && !this.zoneState[this.data.selected]) {
       this.setData({ selected: z });
+      this.persistUI();
     }
 
     // ---- D5 双判定（固定规则 + ML 统计动态阈值，与 Web 端一致）----
@@ -192,7 +213,10 @@ Page({
   // 干预指令（本端或 Web/3D 任何一端发布）：OPEN → HANDLING
   handleAction: function (topic, payload) {
     let msg;
-    try { msg = JSON.parse(payload); } catch (e) { return; }
+    try { msg = JSON.parse(payload); } catch (e) {
+      console.error('[AirGuard][E3] 干预指令解析失败:', e.message, '内容前120字符=', payload.slice(0, 120));
+      return;
+    }
     const z = msg.zoneId || (topic.split('/')[1] || '');
     if (ZONE_IDS.indexOf(z) < 0) return;
     const ev = this.d3Events[z];
@@ -207,12 +231,18 @@ Page({
   // E3 跨端指令：重点关注区域 / 事件已恢复
   handleE3: function (topic, payload) {
     let msg;
-    try { msg = JSON.parse(payload); } catch (e) { return; }
+    try { msg = JSON.parse(payload); } catch (e) {
+      console.error('[AirGuard][E3] E3指令解析失败:', e.message, '内容前120字符=', payload.slice(0, 120));
+      return;
+    }
     if (topic.indexOf('focus') > -1) {
       const z = msg.zoneId;
       if (z === '' || z === 'clear') return; // 恢复规则判定，小程序端本身即规则+人工混合，无需处理
       if (ZONE_IDS.indexOf(z) < 0) return;
-      if (this.data.selected !== z) this.setData({ selected: z });
+      if (this.data.selected !== z) {
+        this.setData({ selected: z });
+        this.persistUI();
+      }
       this.renderAll();
     } else if (topic.indexOf('event') > -1 && msg.op === 'recovered') {
       const z = msg.zoneId;
@@ -236,50 +266,74 @@ Page({
   // 切换重点关注区域：本页切换 + 发布指令，Web 监测台 / three-min 3D 同步更新
   onSelectZone: function (e) {
     const z = e.currentTarget.dataset.zone;
+    console.log('[AirGuard][E3] 点击区域标签:', z); // 诊断：确认 tap 事件触发
     if (ZONE_IDS.indexOf(z) < 0) return;
     this.userPicked = true; // 手动选择后不再自动跟随
     this.setData({ selected: z });
-    this.publish('airguard/e3/focus', JSON.stringify({ zoneId: z, time: nowStr() }));
+    this.persistUI();
+    const ok = this.publish('airguard/e3/focus', JSON.stringify({ zoneId: z, time: nowStr() }));
+    wx.showToast({ title: ok ? '已切换：' + ZONES[z] : '已切换：' + ZONES[z] + '（未同步）', icon: 'none' });
     this.renderAll();
   },
 
-  // 恢复规则判定（清除人工指定）
+  // 恢复规则判定（清除人工指定，Web / 3D 回到 D2 规则计算）
   onClearFocus: function () {
-    this.publish('airguard/e3/focus', JSON.stringify({ zoneId: '', time: nowStr() }));
+    console.log('[AirGuard][E3] 点击恢复规则判定');
+    const ok = this.publish('airguard/e3/focus', JSON.stringify({ zoneId: '', time: nowStr() }));
+    wx.showToast({ title: ok ? '已恢复规则判定' : 'MQTT 未连接', icon: 'none' });
   },
 
   // 标记处理中：复用现有干预协议广播，Web / 3D 同步进入 HANDLING
   onMarkHandling: function () {
+    console.log('[AirGuard][E3] 点击标记处理中');
     const z = this.data.selected;
     const ev = this.d3Events[z];
-    if (!ev || ev.state !== 'OPEN') return;
+    if (!ev || ev.state !== 'OPEN') {
+      wx.showToast({ title: '当前无 OPEN 待处理事件', icon: 'none' });
+      return;
+    }
     ev.state = 'HANDLING';
     ev.action = '小程序巡检标记处理中';
     ev.normalStreak = 0;
     this.publish('airguard/' + z + '/action', JSON.stringify({
       zoneId: z, action: '小程序巡检标记处理中', time: nowStr(),
     }));
+    wx.showToast({ title: '已标记处理中', icon: 'none' });
     this.renderAll();
   },
 
   // 标记已恢复：发布 E3 事件消息，Web / 3D 同步归档事件
   onMarkRecovered: function () {
+    console.log('[AirGuard][E3] 点击标记已恢复');
     const z = this.data.selected;
     const ev = this.d3Events[z];
-    if (!ev || ev.state !== 'HANDLING') return;
+    if (!ev || ev.state !== 'HANDLING') {
+      wx.showToast({ title: '当前无处理中事件', icon: 'none' });
+      return;
+    }
     this.recoverLocal(z, '小程序巡检端标记已恢复');
     this.publish('airguard/e3/event', JSON.stringify({
       zoneId: z, op: 'recovered', note: '小程序巡检确认', time: nowStr(),
     }));
+    wx.showToast({ title: '已标记恢复', icon: 'none' });
     this.renderAll();
   },
 
   publish: function (topic, payload) {
     if (!this.client || !this.client.connected) {
       wx.showToast({ title: 'MQTT 未连接，无法发布', icon: 'none' });
-      return;
+      return false;
     }
     this.client.publish(topic, payload);
+    return true;
+  },
+
+  // 选中区域 / 手动标记写回全局状态：页面退出再进入时保持一致
+  persistUI: function () {
+    const st = getApp().globalData.e3State;
+    if (!st) return;
+    st.userPicked = this.userPicked;
+    st.selected = this.data.selected;
   },
 
   // ---------- 渲染 ----------
@@ -294,6 +348,7 @@ Page({
     const focus = {
       zoneid: z,
       zoneName: ZONES[z],
+      hasData: !!d,
       pm25: d ? d.pm25 : '--',
       co2: d ? d.co2 : '--',
       crowdText: d ? d.crowdText : '--',

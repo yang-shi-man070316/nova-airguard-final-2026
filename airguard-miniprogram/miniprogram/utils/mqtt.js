@@ -254,6 +254,11 @@ class MqttClient {
       const tLen = (bytes[start] << 8) | bytes[start + 1];
       const topic = utf8Decode(bytes, start + 2, start + 2 + tLen);
       const payload = utf8Decode(bytes, start + 2 + tLen, end);
+      // 诊断：payload 不以 { 开头说明发布端用了 Hex/Base64 等非纯文本格式（如 MQTTX 的 Payload 格式设置错误）
+      if (payload.charAt(0) !== '{') {
+        console.warn('[AirGuard][MQTT] 非JSON报文 topic=' + topic +
+          ' 前80字符=' + payload.slice(0, 80));
+      }
       this.emit('message', topic, payload);
     }
     // SUBACK(9) / PINGRESP(13) 无需处理

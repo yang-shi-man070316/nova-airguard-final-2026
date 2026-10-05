@@ -171,6 +171,35 @@
       overflow: hidden;
     }
     .focus-bar i { display: block; height: 100%; }
+
+    /* ===== E3 小程序跨端同步 ===== */
+    .e3-focus-line {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #1d4ed8;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 6px;
+      padding: 6px 10px;
+      margin-bottom: 12px;
+    }
+    .focus-list li.e3-pinned {
+      border: 1px solid #bfdbfe;
+      background: #eff6ff;
+      border-radius: 6px;
+      padding: 8px 10px;
+    }
+    .focus-list li.e3-pinned .focus-reason { color: #1d4ed8; }
+    .e3-tag {
+      font-size: 11px;
+      color: #1d4ed8;
+      background: #dbeafe;
+      border-radius: 4px;
+      padding: 1px 6px;
+      white-space: nowrap;
+    }
     .placeholder {
       border: 1px dashed #cbd5e1;
       border-radius: 8px;
@@ -258,7 +287,7 @@
   <header class="topbar">
     <div>
       <h1>AirGuard · Web 监测台</h1>
-      <div class="sub">多区域实时总览 · 重点区域 · 热力分布 · 趋势 · 事件状态</div>
+      <div class="sub">多区域实时总览 · 重点区域 · 热力分布 · 趋势 · 事件状态 · E3 小程序协同</div>
     </div>
     <div class="top-meta">
       <span id="online-zones">在线区域 <b>0</b>/3</span>
@@ -294,9 +323,10 @@
     <section class="panel" id="panel-focus">
       <div class="panel-head">
         <h2>重点区域<span class="tag">D2</span></h2>
-        <span class="hint">status 严重度 + 人流加分</span>
+        <span class="hint">status 严重度 + 人流加分 · 小程序可指定</span>
       </div>
-      <!-- D2 简化实现：按打分排序展示重点区域，完整计算逻辑后续按任务书迭代 -->
+      <!-- D2 打分排序展示重点区域；小程序 E3 指令指定区域置顶高亮 -->
+      <div id="e3-focus-line" class="e3-focus-line" style="display:none"></div>
       <ol id="focus-list" class="focus-list"></ol>
     </section>
 
@@ -314,10 +344,10 @@
     <section class="panel" id="panel-events">
       <div class="panel-head">
         <h2>事件状态<span class="tag">D3</span></h2>
-        <span class="hint">异常状态自动记录</span>
+        <span class="hint">异常自动 OPEN · 跨端协同处理</span>
       </div>
       <div id="event-states"></div>
-      <!-- D3 预留：事件状态机后续迭代（事件分级、去重、生命周期管理） -->
+      <!-- D3 事件状态机：OPEN → HANDLING → RECOVERED（与小程序/3D 同规则） -->
       <ul id="event-list"></ul>
     </section>
   </main>
@@ -348,6 +378,10 @@
       // 简易事件记录
       const eventLog = [];
       const EVENT_LOG_MAX = 100;
+
+      // ============ E3 跨端协同（与小程序 / index.html / 3D 同一套协议与规则） ============
+      let e3FocusZone = null; // 小程序人工指定重点区域（null = 按 D2 规则计算；zoneId 为空恢复规则判定）
+      const d3Events = {};    // zone → {state:'OPEN'|'HANDLING', desc, action, normalStreak}
 
       // status → 卡片背景色（与总视图 portal 一致）
       const STATUS_BG = {
@@ -387,6 +421,7 @@
       const $eventStates = document.getElementById('event-states');
       const $eventList = document.getElementById('event-list');
       const $trendMeta = document.getElementById('trend-meta');
+      const $e3FocusLine = document.getElementById('e3-focus-line');
 
       // ============ status 计算（任务书：按顺序判定，仅用 pm25 / co2） ============
       function calcStatus(pm25, co2) {
@@ -428,7 +463,6 @@
           console.warn('[AirGuard] 未知区域消息，已忽略:', topic);
           return;
         }
-        const prev = zoneState[zone];
         const status = calcStatus(payload.pm25, payload.co2);
         const receivedAt = new Date();
         // 只更新对应 zone 的条目，绝不写入其他区域
@@ -449,18 +483,66 @@
         });
         if (zoneHistory[zone].length > HISTORY_MAX) zoneHistory[zone].shift();
 
-        // 简易事件记录：仅当状态变为异常（非“正常”）时追加一条，避免重复消息刷屏
-        if (status !== '正常' && (!prev || prev.status !== status)) {
-          eventLog.push({
-            zone: zone, status: status,
-            pm25: payload.pm25, co2: payload.co2,
-            at: receivedAt,
-          });
-          if (eventLog.length > EVENT_LOG_MAX) {
-            eventLog.splice(0, eventLog.length - EVENT_LOG_MAX);
+        // D3 事件状态机（与小程序 / 3D 同规则）：异常 → OPEN；HANDLING 后连续 2 条正常 → 自动恢复
+        const ev = d3Events[zone];
+        if (status !== '正常') {
+          if (!ev) {
+            d3Events[zone] = { state: 'OPEN', desc: status, action: null, normalStreak: 0 };
+            pushEvent({ zone: zone, kind: 'open', status: status, pm25: payload.pm25, co2: payload.co2, at: receivedAt });
+          } else {
+            ev.desc = status;
           }
+        } else if (ev && ev.state === 'HANDLING') {
+          ev.normalStreak += 1;
+          if (ev.normalStreak >= 2) recoverLocal(zone, '连续正常报文自动恢复');
         }
         renderAll();
+      }
+
+      // 事件日志追加（保留最近 EVENT_LOG_MAX 条）
+      function pushEvent(entry) {
+        eventLog.push(entry);
+        if (eventLog.length > EVENT_LOG_MAX) {
+          eventLog.splice(0, eventLog.length - EVENT_LOG_MAX);
+        }
+      }
+
+      // 本地事件恢复：活跃事件 → 历史日志（与小程序端 RECOVERED 归档一致）
+      function recoverLocal(zone, result) {
+        const ev = d3Events[zone];
+        if (!ev) return;
+        pushEvent({ zone: zone, kind: 'recovered', status: ev.desc, action: ev.action, result: result, at: new Date() });
+        d3Events[zone] = null;
+      }
+
+      // 干预指令（airguard/{zone}/action，小程序/Web 任一端发布）：OPEN → HANDLING
+      function onActionMessage(topic, payload) {
+        const zone = resolveZone(topic, payload);
+        if (!zone) return;
+        const ev = d3Events[zone];
+        if (ev && ev.state === 'OPEN') {
+          ev.state = 'HANDLING';
+          ev.action = payload.action || '干预';
+          ev.normalStreak = 0;
+          pushEvent({ zone: zone, kind: 'handling', status: ev.desc, action: ev.action, at: new Date() });
+          renderAll();
+        }
+      }
+
+      // E3 跨端指令：小程序切换重点区域 / 标记事件已恢复
+      function onE3Message(topic, payload) {
+        if (topic.indexOf('airguard/e3/focus') === 0) {
+          const z = payload.zoneId;
+          e3FocusZone = (z && Object.prototype.hasOwnProperty.call(ZONES, z)) ? z : null;
+          console.log('[AirGuard][E3] 重点区域指令:', z || '（恢复规则判定）');
+          renderAll();
+        } else if (topic.indexOf('airguard/e3/event') === 0 && payload.op === 'recovered') {
+          const z = payload.zoneId;
+          if (!Object.prototype.hasOwnProperty.call(ZONES, z)) return;
+          console.log('[AirGuard][E3] 事件已恢复指令:', z);
+          recoverLocal(z, '小程序巡检端标记已恢复');
+          renderAll();
+        }
       }
 
       // ============ 渲染：所有模块同源，只读 zoneState / zoneHistory / eventLog ============
@@ -485,6 +567,7 @@
           if (!d) {
             return '<section class="zone-card">' +
               '<div class="card-head"><h3>' + ZONES[zone].name +
+              (e3FocusZone === zone ? ' <span class="e3-tag">📱 小程序指定</span>' : '') +
               ' <span class="zone-id">' + zone + '</span></h3></div>' +
               '<p class="zone-empty">暂无实时数据</p>' +
               '</section>';
@@ -493,6 +576,7 @@
           const accent = STATUS_ACCENT[d.status] || WAIT_ACCENT;
           return '<section class="zone-card" style="background:' + bg + ';border-left-color:' + accent + '">' +
             '<div class="card-head"><h3>' + ZONES[zone].name +
+            (e3FocusZone === zone ? ' <span class="e3-tag">📱 小程序指定</span>' : '') +
             ' <span class="zone-id">' + zone + '</span></h3>' +
             '<span class="status-badge" style="background:' + accent + '">' + d.status + '</span></div>' +
             '<ul class="metrics">' +
@@ -516,28 +600,58 @@
       }
 
       function renderFocus() {
+        // E3 小程序指定重点区域提示条（zoneId 为空 = 恢复规则判定）
+        if (e3FocusZone) {
+          $e3FocusLine.style.display = 'flex';
+          $e3FocusLine.innerHTML = '📱 小程序指定重点区域：' + ZONES[e3FocusZone].name +
+            '（' + e3FocusZone + '）· 跨端协同同步';
+        } else {
+          $e3FocusLine.style.display = 'none';
+        }
+
         const scored = ZONE_IDS.map(function (z) {
           return { zone: z, d: zoneState[z], score: zoneScore(zoneState[z]) };
         }).filter(function (x) { return x.d && x.score > 1.5; })
           .sort(function (a, b) { return b.score - a.score; });
 
+        // 小程序指定区域置顶（该区域暂无数据时也展示等待行，跨端联动可见）
+        if (e3FocusZone) {
+          const idx = scored.findIndex(function (x) { return x.zone === e3FocusZone; });
+          if (idx > -1) {
+            const pinned = scored.splice(idx, 1)[0];
+            pinned.e3Assigned = true;
+            scored.unshift(pinned);
+          } else {
+            scored.unshift({ zone: e3FocusZone, d: null, score: 0, e3Assigned: true });
+          }
+        }
+
         if (scored.length === 0) {
           $focusList.innerHTML = '<div class="placeholder">当前各区域状态良好，暂无重点区域</div>';
           return;
         }
-        const maxScore = scored[0].score;
+        const maxScore = Math.max.apply(null, scored.map(function (x) { return x.score; })) || 1;
         $focusList.innerHTML = scored.map(function (x) {
           const d = x.d;
-          const reasons = [];
-          if (d.status !== '正常') reasons.push(d.status);
-          if (Number(d.crowdLevel) >= 2) reasons.push('人流' + crowdText(d.crowdLevel));
-          const accent = STATUS_ACCENT[d.status] || WAIT_ACCENT;
-          const pct = Math.max(8, Math.round(x.score / maxScore * 100));
-          return '<li>' +
+          let reason = '综合关注';
+          let accent = WAIT_ACCENT;
+          let pct = 8;
+          let scoreText = '—';
+          if (d) {
+            const reasons = [];
+            if (d.status !== '正常') reasons.push(d.status);
+            if (Number(d.crowdLevel) >= 2) reasons.push('人流' + crowdText(d.crowdLevel));
+            reason = reasons.join(' · ') || '综合关注';
+            accent = STATUS_ACCENT[d.status] || WAIT_ACCENT;
+            pct = Math.max(8, Math.round(x.score / maxScore * 100));
+            scoreText = x.score.toFixed(1);
+          }
+          if (x.e3Assigned) reason = '小程序巡检端人工指定（跨端协同同步）';
+          return '<li class="' + (x.e3Assigned ? 'e3-pinned' : '') + '">' +
             '<div class="focus-head"><b>' + ZONES[x.zone].name + '</b>' +
             '<span class="zone-id">' + x.zone + '</span>' +
-            '<span class="focus-reason">' + (reasons.join(' · ') || '综合关注') + '</span>' +
-            '<span class="focus-score">' + x.score.toFixed(1) + '</span></div>' +
+            '<span class="focus-reason">' + reason + '</span>' +
+            '<span class="focus-score">' + scoreText + '</span></div>' +
             '<div class="focus-bar"><i style="width:' + pct + '%;background:' + accent + '"></i></div>' +
             '</li>';
         }).join('');
@@ -582,10 +696,21 @@
         $heatMap.innerHTML = cells.join('') + labels.join('');
       }
 
-      // D3 事件状态：各区域当前状态徽章 + 异常事件记录列表
+      // D3 事件状态：各区域当前状态徽章（含 E3 事件状态机）+ 事件记录列表
       function renderEvents() {
         $eventStates.innerHTML = ZONE_IDS.map(function (z) {
           const d = zoneState[z];
+          const ev = d3Events[z];
+          if (ev) {
+            if (ev.state === 'OPEN') {
+              const accent = STATUS_ACCENT[ev.desc] || WAIT_ACCENT;
+              const bg = STATUS_BG[ev.desc] || WAIT_BG;
+              return '<span class="ev-chip" style="background:' + bg + ';border-color:' + accent + ';color:' + accent + '">' +
+                ZONES[z].name + '：' + ev.desc + '（OPEN 待处理）</span>';
+            }
+            return '<span class="ev-chip" style="background:#fff8e1;border-color:#f59e0b;color:#b45309">' +
+              ZONES[z].name + '：' + ev.desc + '（HANDLING 处理中 · ' + (ev.action || '—') + '）</span>';
+          }
           if (!d) {
             return '<span class="ev-chip">' + ZONES[z].name + '：暂无数据</span>';
           }
@@ -605,9 +730,16 @@
         }
         $eventList.innerHTML = eventLog.slice().reverse().map(function (ev) {
           const t = ev.at.toLocaleTimeString('zh-CN', { hour12: false });
+          let text;
+          if (ev.kind === 'handling') {
+            text = '标记处理中 HANDLING · ' + (ev.action || '干预');
+          } else if (ev.kind === 'recovered') {
+            text = '已恢复 RECOVERED · ' + ev.result;
+          } else {
+            text = '异常事件 OPEN · ' + ev.status + '（PM2.5 ' + fmt(ev.pm25) + ' · CO₂ ' + fmt(ev.co2) + '）';
+          }
           return '<li><span class="ev-time">' + t + '</span>' +
-            '<span class="ev-zone">' + ZONES[ev.zone].name + '（' + ev.zone + '）</span> → ' +
-            ev.status + '（PM2.5 ' + fmt(ev.pm25) + ' · CO₂ ' + fmt(ev.co2) + '）</li>';
+            '<span class="ev-zone">' + ZONES[ev.zone].name + '（' + ev.zone + '）</span> → ' + text + '</li>';
         }).join('');
       }
 
@@ -686,7 +818,8 @@
 
       client.on('connect', function () {
         setConn('on');
-        client.subscribe(TOPIC, function (err) {
+        // 环境数据 + 干预指令 + E3 跨端指令（小程序切换重点区域 / 标记事件状态）
+        client.subscribe([TOPIC, 'airguard/+/action', 'airguard/e3/focus', 'airguard/e3/event'], function (err) {
           if (err) console.error('[AirGuard] 订阅失败:', err);
         });
       });
@@ -704,6 +837,9 @@
           if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
             throw new Error('payload 不是对象');
           }
+          // 消息分流：E3 跨端指令 / 干预指令 / 环境报文
+          if (topic.indexOf('airguard/e3/') === 0) { onE3Message(topic, payload); return; }
+          if (topic.indexOf('/action') > -1) { onActionMessage(topic, payload); return; }
           onEnvMessage(topic, payload);
         } catch (e) {
           // 错误 JSON 报文不崩溃页面，仅控制台输出错误
