@@ -3,6 +3,7 @@
 // 各页面分别建连会超限报 exceed max task count）。
 // 统一订阅全部主题，页面按需注册/注销消息处理器；连接状态经 onConnChange 通知各页面。
 const MqttClient = require('./utils/mqtt.js');
+const e3store = require('./utils/e3store.js');
 
 const MQTT_URL = 'ws://127.0.0.1:8083/mqtt'; // 本地联调；真机改为局域网 IP 或 wss
 
@@ -37,6 +38,14 @@ App({
 
     this.globalData.mqtt = mqtt;
     this._connListeners = [];
+
+    // E3 巡检协同共享状态机：在全局连接上注册一次消息处理，
+    // 无论 E3 页面是否打开都持续更新（页面只渲染，不再自己接消息）
+    this.globalData.e3store = e3store.create(this);
+    mqtt.on('message', function (topic, payload) {
+      self.globalData.e3store.handleMsg(topic, payload);
+    });
+
     mqtt.connect();
 
     // 统一订阅：环境数据 + 干预指令 + E3 跨端指令（CONNACK 前自动排队）

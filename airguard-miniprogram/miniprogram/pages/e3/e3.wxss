@@ -67,6 +67,47 @@
   margin: 8rpx 0 16rpx;
   font-weight: 600;
 }
+
+/* ===== 三区实时状态条（三个区域同屏，每条报文都有可见反应） ===== */
+.zone-strip {
+  display: flex;
+  gap: 12rpx;
+  margin-bottom: 20rpx;
+}
+.zone-cell {
+  flex: 1;
+  background: #ffffff;
+  border: 2rpx solid #dbe3ec;
+  border-radius: 12rpx;
+  padding: 14rpx 12rpx;
+}
+.zone-cell.active {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2rpx rgba(37, 99, 235, 0.2);
+}
+.zc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6rpx;
+  margin-bottom: 8rpx;
+}
+.zc-name {
+  font-size: 26rpx;
+  font-weight: 600;
+}
+.zc-tag {
+  font-size: 18rpx;
+  color: #ffffff;
+  padding: 2rpx 10rpx;
+  border-radius: 999rpx;
+  white-space: nowrap;
+}
+.zc-metrics {
+  font-size: 20rpx;
+  color: #6b7280;
+  line-height: 1.4;
+}
 .zone-tabs {
   display: flex;
   gap: 16rpx;

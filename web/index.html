@@ -1583,7 +1583,13 @@
       client.on('message', function (topic, message) {
         try {
           // TextDecoder 兼容 Buffer / Uint8Array 两种 payload 形态
-          const payload = JSON.parse(new TextDecoder().decode(message));
+          const text = new TextDecoder().decode(message);
+          // 前置判断：空报文直接跳过，避免 JSON.parse 抛 Unexpected end of JSON input
+          if (!text || text.trim() === '') {
+            console.warn('[AirGuard] 收到空报文，跳过解析 topic=' + topic);
+            return;
+          }
+          const payload = JSON.parse(text);
           if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
             throw new Error('payload 不是对象');
           }
@@ -2002,7 +2008,13 @@
       });
       e2Client.on('message', function (topic, message) {
         try {
-          const p = JSON.parse(new TextDecoder().decode(message));
+          const text = new TextDecoder().decode(message);
+          // 前置判断：空报文直接跳过，避免 JSON.parse 抛 Unexpected end of JSON input
+          if (!text || text.trim() === '') {
+            console.warn('[AirGuard] 收到空报文，跳过解析 topic=' + topic);
+            return;
+          }
+          const p = JSON.parse(text);
           if (!p || typeof p !== 'object' || Array.isArray(p)) return;
           const z = resolveZone(topic, p);
           if (z) { renderE2Status(); renderE2Log(); }
@@ -2073,7 +2085,13 @@
       });
       e3Client.on('message', function (topic, message) {
         try {
-          const p = JSON.parse(new TextDecoder().decode(message));
+          const text = new TextDecoder().decode(message);
+          // 前置判断：空报文直接跳过，避免 JSON.parse 抛 Unexpected end of JSON input
+          if (!text || text.trim() === '') {
+            console.warn('[AirGuard] 收到空报文，跳过解析 topic=' + topic);
+            return;
+          }
+          const p = JSON.parse(text);
           if (!p || typeof p !== 'object' || Array.isArray(p)) return;
           if (topic.indexOf('airguard/e3/focus') === 0) {
             // 小程序切换重点关注区域：Web 优先关注面板 / 概览 / 表格同步更新

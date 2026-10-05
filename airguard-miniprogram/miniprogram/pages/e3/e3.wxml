@@ -15,6 +15,23 @@
     </view>
   </view>
 
+  <view class="section-title">三区实时状态（点击切换重点区域）</view>
+  <view class="zone-strip">
+    <view
+      wx:for="{{zoneBrief}}"
+      wx:key="zoneid"
+      class="zone-cell {{item.zoneid === selected ? 'active' : ''}}"
+      data-zone="{{item.zoneid}}"
+      bindtap="onSelectZone"
+    >
+      <view class="zc-head">
+        <text class="zc-name">{{item.zoneName}}</text>
+        <text class="zc-tag" style="background:{{item.accent}};">{{item.statusText}}</text>
+      </view>
+      <view class="zc-metrics">PM2.5 {{item.pm25}} · CO₂ {{item.co2}} · {{item.crowdText}}</view>
+    </view>
+  </view>
+
   <view class="section-title">重点关注区域（切换后 Web / 3D 同步更新）</view>
   <view class="zone-tabs">
     <view

@@ -73,6 +73,11 @@ Page({
   // 处理单条环境报文：{"zoneId":"zone-n","pm25":160,"co2":920,"crowdLevel":3,"time":"..."}
   handleMsg: function (topic, payload) {
     if (topic.indexOf('/env') === -1) return; // 共享连接上还有其他主题，只处理环境报文
+    // 前置判断：空报文直接跳过，避免 JSON.parse 抛 Unexpected end of JSON input
+    if (!payload || payload.trim() === '') {
+      console.warn('[AirGuard] 收到空报文，跳过解析 topic=' + topic);
+      return;
+    }
     let msg;
     try {
       msg = JSON.parse(payload);
