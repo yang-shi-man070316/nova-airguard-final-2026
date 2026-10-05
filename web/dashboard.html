@@ -532,17 +532,45 @@
       // E3 跨端指令：小程序切换重点区域 / 标记事件已恢复
       function onE3Message(topic, payload) {
         if (topic.indexOf('airguard/e3/focus') === 0) {
+          e3Ack(payload, 'received'); // 回执①：已接收
           const z = payload.zoneId;
           e3FocusZone = (z && Object.prototype.hasOwnProperty.call(ZONES, z)) ? z : null;
           console.log('[AirGuard][E3] 重点区域指令:', z || '（恢复规则判定）');
           renderAll();
+          e3Ack(payload, 'executed'); // 回执②：业务执行完成
         } else if (topic.indexOf('airguard/e3/event') === 0 && payload.op === 'recovered') {
+          e3Ack(payload, 'received'); // 回执①：已接收
           const z = payload.zoneId;
-          if (!Object.prototype.hasOwnProperty.call(ZONES, z)) return;
+          if (!Object.prototype.hasOwnProperty.call(ZONES, z)) { e3Ack(payload, 'executed'); return; }
           console.log('[AirGuard][E3] 事件已恢复指令:', z);
           recoverLocal(z, '小程序巡检端标记已恢复');
           renderAll();
+          e3Ack(payload, 'executed'); // 回执②：业务执行完成
         }
+      }
+
+      // ---------- 消息确认回执（任务书三级反馈；新增，不影响原有逻辑） ----------
+      // 收到小程序指令（带 msgId）→ 立即回执 received；业务执行完成后回执 executed
+      function e3NowStr() {
+        const d = new Date();
+        const p = function (n) { return (n < 10 ? '0' : '') + n; };
+        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+          p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+      }
+      function e3Ack(payload, ackType) {
+        if (!payload || !payload.msgId) return; // 无 msgId（如 MQTTX 手发旧格式指令）不发回执，兼容原有流程
+        try {
+          client.publish('airguard/E3/ack', JSON.stringify({
+            msgId: payload.msgId,
+            zoneId: payload.zoneId || '',
+            ackType: ackType,
+            source: 'web',
+            time: e3NowStr(),
+          }));
+        } catch (e) {
+          console.error('[AirGuard][E3] 回执发布失败:', e);
+        }
+        console.log('[AirGuard][E3] 回执:', ackType, payload.msgId);
       }
 
       // ============ 渲染：所有模块同源，只读 zoneState / zoneHistory / eventLog ============
@@ -845,7 +873,12 @@
           }
           // 消息分流：E3 跨端指令 / 干预指令 / 环境报文
           if (topic.indexOf('airguard/e3/') === 0) { onE3Message(topic, payload); return; }
-          if (topic.indexOf('/action') > -1) { onActionMessage(topic, payload); return; }
+          if (topic.indexOf('/action') > -1) {
+            e3Ack(payload, 'received');  // 回执①：已接收（小程序指令带 msgId 时）
+            onActionMessage(topic, payload);
+            e3Ack(payload, 'executed');  // 回执②：业务执行完成
+            return;
+          }
           onEnvMessage(topic, payload);
         } catch (e) {
           // 错误 JSON 报文不崩溃页面，仅控制台输出错误

@@ -57,6 +57,12 @@
   <!-- E3 巡检协同入口 -->
   <view class="e3-entry" bindtap="goE3">📱 进入 E3 巡检协同（Web 同步）→</view>
 
+  <!-- 刷新 / 清空：页面卡顿点刷新，清空页面点清空 -->
+  <view class="util-row">
+    <view class="util-btn refresh" bindtap="onRefresh">🔄 刷新</view>
+    <view class="util-btn clear" bindtap="onClear">🗑 清空</view>
+  </view>
+
   <!-- 底部数据来源提示 -->
   <view class="footer">数据来源：MQTT · {{topicText}}</view>
 </view>

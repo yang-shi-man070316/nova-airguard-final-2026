@@ -83,6 +83,15 @@
     <view class="clear-focus" bindtap="onClearFocus">恢复规则判定重点区域</view>
   </view>
 
+  <!-- 指令确认状态：三级回执（已发送 / 已接收 / 已执行 / 超时），多条独立展示 -->
+  <view wx:if="{{ackList.length > 0}}" class="section-title">指令确认状态（三级回执）</view>
+  <view wx:if="{{ackList.length > 0}}" class="card ack-card">
+    <view wx:for="{{ackList}}" wx:key="msgId" class="ack-item">
+      <text class="ack-desc">{{item.desc}}</text>
+      <text class="ack-status {{item.cls}}">{{item.statusText}}</text>
+    </view>
+  </view>
+
   <view class="section-title">最近事件（与 Web / 3D 同源）</view>
   <view class="card ev-card">
     <view wx:for="{{events}}" wx:key="key" class="ev-item">
@@ -94,6 +103,12 @@
 
   <!-- 自诊断行：连接状态 + 收消息计数 + 最近主题（排查页面无反应用） -->
   <view class="diag-line">诊断：{{connText}} · 已收消息 {{msgCount}} 条 · 最近主题 {{lastTopic}}</view>
+
+  <!-- 刷新 / 清空：页面卡顿点刷新，清空页面点清空 -->
+  <view class="util-row">
+    <view class="util-btn refresh" bindtap="onRefresh">🔄 刷新</view>
+    <view class="util-btn clear" bindtap="onClear">🗑 清空</view>
+  </view>
 
   <view class="footer">数据来源：同一 MQTT Broker · E3 v2（共享连接）</view>
 </view>

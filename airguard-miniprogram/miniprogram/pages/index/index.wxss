@@ -180,3 +180,28 @@
   border-radius: 999rpx;
   padding: 18rpx 0;
 }
+
+/* ===== 刷新 / 清空操作行 ===== */
+.util-row {
+  display: flex;
+  gap: 16rpx;
+  margin-top: 24rpx;
+}
+.util-btn {
+  flex: 1;
+  text-align: center;
+  font-size: 26rpx;
+  font-weight: 600;
+  border-radius: 999rpx;
+  padding: 14rpx 0;
+}
+.util-btn.refresh {
+  color: #2563eb;
+  background: #eff6ff;
+  border: 2rpx solid #bfdbfe;
+}
+.util-btn.clear {
+  color: #dc2626;
+  background: #fef2f2;
+  border: 2rpx solid #fecaca;
+}

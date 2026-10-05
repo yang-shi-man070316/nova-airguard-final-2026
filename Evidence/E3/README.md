@@ -28,17 +28,18 @@
 |---|---|
 | Broker | mosquitto 运行中（TCP 1883 + WebSocket 8083） |
 | 数据源 | sensor_sim.py（任意模式）或 MQTTX |
-| 小程序 | 微信开发者工具打开 `airguard-miniprogram` 工程；**详情 → 本地设置 → 勾选「不校验合法域名、web-view（业务域名）、TLS 版本以及 HTTPS 证书」**；修改代码后点「编译」 |
+| 小程序 | 微信开发者工具打开 `airguard-miniprogram` 工程；**详情 → 本地设置 → 勾选「不校验合法域名、web-view（业务域名）、TLS 版本以及 HTTPS 证书」**；修改代码后点「编译」；真机调试需手机与电脑同一局域网（app.js 已配电脑局域网 IP） |
 | Web / 3D | 浏览器直接打开 web/index.html 与 three3d/three-min.html（可同时开三个窗口对照观察） |
 
 ## 三、MQTT 协议总表（三端共用）
 
 | 主题 | 方向 | 载荷 | 作用 |
 |---|---|---|---|
-| `airguard/+/env` | 任意源 → 三端 | `{"zoneId","pm25","co2","crowdLevel","time"}` | 环境数据（核心字段三端完全一致） |
-| `airguard/{zone}/action` | 小程序/Web → 三端 | `{"zoneId","action","time"}` | 干预指令：OPEN → HANDLING（复用 D3 协议） |
-| `airguard/e3/focus` | 小程序 → Web/3D | `{"zoneId","time"}` | 切换重点区域（zoneId 为空 = 恢复规则判定） |
-| `airguard/e3/event` | 小程序 → Web/3D | `{"zoneId","op":"recovered","note","time"}` | 标记事件已恢复 → 三端归档 RECOVERED |
+| `airguard/+/env` | 任意源 → 三端 | `{"zoneId","pm25","co2","crowdLevel","time"}` | 环境数据（核心字段三端完全一致；**不参与回执，无 msgId**） |
+| `airguard/{zone}/action` | 小程序/Web → 三端 | `{"zoneId","action","msgId","time"}` | 干预指令：OPEN → HANDLING（复用 D3 协议；小程序下发带 msgId） |
+| `airguard/e3/focus` | 小程序 → Web/3D | `{"zoneId","msgId","time"}` | 切换重点区域（zoneId 为空 = 恢复规则判定；带 msgId） |
+| `airguard/e3/event` | 小程序 → Web/3D | `{"zoneId","op":"recovered","note","msgId","time"}` | 标记事件已恢复 → 三端归档 RECOVERED（带 msgId） |
+| `airguard/E3/ack` | Web/3D → 小程序 | `{"msgId","zoneId","ackType":"received\|executed","source":"web\|three3d","time"}` | **指令回执（消息确认）**：收到指令 → received；业务执行完成 → executed。Web/3D 自动发布，MQTTX 无需手动发布 |
 
 状态一致性（同一套规则生成，任何一端都不各自维护不一致结果）：
 
@@ -80,6 +81,29 @@
 条件不满足时按钮显示灰色（非禁用），点击会弹出提示（如「当前无 OPEN 待处理事件」），保证每次点击都有可见反馈。
 
 事件也会被数据自动驱动：异常报文 → OPEN；HANDLING 后连续 2 条正常报文 → 自动 RECOVERED（与 Web 同规则）。
+
+### 6. 指令确认状态（三级回执，任务书消息确认）
+
+小程序下发任意 E3 指令（切换重点区域 / 恢复规则判定 / 标记处理中 / 标记已恢复）时，代码自动生成唯一 msgId 追加到指令 JSON。Web / 3D 收到后自动发布两级回执到 `airguard/E3/ack`，小程序按 msgId 匹配，在操作按钮下方展示确认状态（多条操作各自独立展示，互不干扰）：
+
+| 状态 | 展示 | 触发条件 |
+|---|---|---|
+| ✅已发送 | 蓝色 | 点击按钮、指令已发布（msgId 已生成） |
+| 📩已接收 | 青色 | 收到 Web/3D 的 `ackType:"received"` 回执 |
+| 🟢已执行 | 绿色 | 收到 `ackType:"executed"` 回执（业务渲染/状态更新完成） |
+| ⚠等待确认超时，请检查连接 | 红色 | 60 秒未收到 executed 回执，自动判超时并弹一次提示 |
+| ❌未发送（MQTT 未连接） | 红色 | 发布时 MQTT 未连接，指令未发出 |
+
+说明：传感器环境报文 `airguard/+/env` 格式完全不变、不参与回执；MQTTX 手动发布的指令不带 msgId 时 Web/3D 不发回执（兼容原有流程）。
+
+### 7. 刷新 / 清空按钮（首页与 E3 页底部）
+
+真机调试时电脑端点「编译」只重置模拟器，手机上运行的小程序实例不会清空，页面底部提供两个胶囊按钮：
+
+| 按钮 | 行为 |
+|---|---|
+| 🔄 刷新 | 同步 MQTT 连接状态 + 全量重渲染；若 MQTT 已断开则强制重连（干净关闭旧连接后重建，CONNACK 后按清单自动重订阅），toast 提示「已刷新，正在重连…」 |
+| 🗑 清空 | 弹确认框 → 页面数据恢复初始状态（E3 页清空共享状态机，等效小程序重启；首页清空三区卡片与感知结论）。MQTT 连接保持不断，新报文到达后自动重新填充 |
 
 ### 页面状态保持
 
@@ -127,13 +151,23 @@ E3 业务状态由**共享状态机** `utils/e3store.js` 维护：app.js 在全�
 
 重启 mosquitto（或断网 10 秒）→ 三端显示断开 → 恢复后自动重连，新报文继续三端同步，无需任何手动操作。
 
+### 验收 5：消息确认回执（三级反馈）
+
+**准备**：broker 运行 → index.html + three-min.html 两个浏览器窗口打开 → 小程序编译进入 E3 页 → MQTTX 先发一条异常报文制造 OPEN 事件。
+
+1. 小程序点「教学区」标签 → 操作按钮下方「指令确认状态」出现 `19:xx:xx · 切换重点区域·教学区`，状态先显示 **✅已发送**，约 1 秒内依次变 **📩已接收** → **🟢已执行**
+2. **通过标准**：Web F12 Console 出现 `[AirGuard][E3] 回执: received` 与 `回执: executed` 日志（index.html / dashboard.html / three-min.html 任一打开的页面都会发回执）；MQTTX 订阅 `airguard/E3/ack` 能观察到 received 与 executed 两条回执报文（无需手动发布）
+3. 依次操作「标记处理中」「标记已恢复」「恢复规则判定」→ 每条指令各自独立出现一条状态记录，互不影响
+4. 关闭所有 Web 页面（index.html、dashboard.html、three-min.html 三个窗口全关，无接收端）→ 小程序再点「标记处理中」→ 显示 **✅已发送**，60 秒后自动变 **⚠等待确认超时，请检查连接** 并弹出一次提示
+5. 环境报文回归：MQTTX 发 `airguard/+/env` 报文 → 三端数据照常刷新，不出现任何回执交互
+
 ## 六、常见问题
 
 | 现象 | 原因与处理 |
 |---|---|
 | `exceed max task count` / 同时最多发起 2 个 socket | 页面各自建连超限 → 已改为 app.js 全局单例（全小程序仅 1 个 WebSocket）；改代码后需点「编译」 |
 | `closeSocket:fail task not found` | 关闭无效连接任务 → 连接失败时 task 置空，不再触发 |
-| 小程序收不到数据 | 检查本地设置是否勾选「不校验合法域名」；确认 broker 8083 在监听；真机需把 ws://127.0.0.1 改为电脑局域网 IP |
+| 小程序收不到数据 | 检查本地设置是否勾选「不校验合法域名」；确认 broker 8083 在监听；真机需用电脑局域网 IP（app.js 已默认 192.168.100.102，换网络后 ipconfig 查新 IP 更新） |
 | 切换区域后 Web 没变化 | 确认小程序连接状态为绿色「已连接」；打开 Web 页面 F12 Console 看 `[AirGuard][E3] 重点区域指令` 日志 |
 | 三端数值不一致 | 属异常：三端字段均直接取自同一 MQTT 报文，status 三端按同一规则计算；若不一致先对比 time 字段是否为同一条报文 |
 | 小程序告警弹窗在其他页弹出 | 已修复：弹窗仅在本页可见时触发 |

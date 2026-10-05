@@ -5,7 +5,9 @@
 const MqttClient = require('./utils/mqtt.js');
 const e3store = require('./utils/e3store.js');
 
-const MQTT_URL = 'ws://127.0.0.1:8083/mqtt'; // 本地联调；真机改为局域网 IP 或 wss
+// 真机联调：手机连的是这台电脑，必须用电脑局域网 IP（127.0.0.1 在手机上指向手机自己）
+// 电脑端模拟器用该 IP 同样可连（本机回环）。若路由器重新分配 IP 导致连不上，用 ipconfig 查新 IP 更新这里。
+const MQTT_URL = 'ws://192.168.100.102:8083/mqtt';
 
 App({
   globalData: {
@@ -48,11 +50,12 @@ App({
 
     mqtt.connect();
 
-    // 统一订阅：环境数据 + 干预指令 + E3 跨端指令（CONNACK 前自动排队）
+    // 统一订阅：环境数据 + 干预指令 + E3 跨端指令 + E3 指令回执（CONNACK 前自动排队）
     mqtt.subscribe('airguard/+/env');
     mqtt.subscribe('airguard/+/action');
     mqtt.subscribe('airguard/e3/focus');
     mqtt.subscribe('airguard/e3/event');
+    mqtt.subscribe('airguard/E3/ack');
   },
 
   // 连接状态变化通知（页面 onLoad 注册 / onUnload 注销）

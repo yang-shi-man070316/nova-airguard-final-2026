@@ -124,12 +124,13 @@ class MqttClient {
   connect() {
     const self = this;
     this.ended = false;
-    this.task = wx.connectSocket({
+    const task = wx.connectSocket({
       url: this.url,
       protocols: ['mqtt'],
       fail: function (err) {
         // 连接失败（如超出微信最多 2 个 socket 限制）：task 无效置空，
         // 避免后续 close 报 closeSocket:fail task not found；5 秒后重试
+        if (self.task !== task) return; // 已重建新连接，忽略旧任务失败
         self.task = null;
         self.emit('error', new Error((err && err.errMsg) || 'connectSocket fail'));
         if (!self.ended) {
@@ -138,14 +139,18 @@ class MqttClient {
         }
       },
     });
-    this.task.onOpen(function () {
+    this.task = task;
+    task.onOpen(function () {
       // WebSocket 建立后发送 MQTT CONNECT 握手报文
-      self.task.send({ data: new Uint8Array(buildConnectPacket(self.clientId)).buffer });
+      if (self.task !== task) return;
+      task.send({ data: new Uint8Array(buildConnectPacket(self.clientId)).buffer });
     });
-    this.task.onMessage(function (res) {
+    task.onMessage(function (res) {
+      if (self.task !== task) return;
       self.onData(res.data);
     });
-    this.task.onClose(function () {
+    task.onClose(function () {
+      if (self.task !== task) return; // 旧连接关闭回调，忽略（已重建新连接）
       self.connected = false;
       self.stopPing();
       self.emit('close');
@@ -155,9 +160,27 @@ class MqttClient {
         self.reconnectTimer = setTimeout(function () { self.connect(); }, 5000);
       }
     });
-    this.task.onError(function (err) {
+    task.onError(function (err) {
+      if (self.task !== task) return;
       self.emit('error', err);
     });
+  }
+
+  // 手动强制重连（页面「刷新」按钮，连接断开时调用）：
+  // 先干净关闭旧连接再重建；CONNACK 后按订阅清单自动重新订阅。
+  // 旧连接的关闭/失败回调通过 task 身份判断被忽略，不会误报断开或重复重连。
+  forceReconnect() {
+    this.ended = true; // 阻止关闭回调再排自动重连
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.stopPing();
+    if (this.task) {
+      const old = this.task;
+      this.task = null; // 置空后旧任务的所有回调被忽略
+      try { old.close({}); } catch (e) { /* 忽略关闭异常 */ }
+    }
+    this.connected = false;
+    this.connect();
   }
 
   end() {

@@ -21,6 +21,11 @@ const STATUS_ACCENT = {
 };
 const CROWD_TEXT = { 0: '稀疏', 1: '正常', 2: '拥挤', 3: '严重拥挤' };
 
+// ============ E3 消息确认回执（任务书：已发送 / 已接收 / 已执行 三级反馈） ============
+const ACK_TOPIC = 'airguard/E3/ack'; // 回执主题：Web / 3D 收到小程序指令后自动发布
+const ACK_TIMEOUT_MS = 60000;        // 60 秒未收到回执判超时
+const CMD_LOG_MAX = 10;               // 页面上最多展示最近 10 条指令状态
+
 // 统一判级规则（与全端一致，仅用 pm25/co2）
 function calcStatus(pm25, co2) {
   if (pm25 > 150) return '重度污染';
@@ -59,7 +64,9 @@ function create(app) {
     selected: 'zone-w',
     msgCount: 0,     // 自诊断：累计收到消息数（页面未打开时也计数）
     lastTopic: '—',  // 自诊断：最近收到的主题
+    cmdLog: [],      // 指令确认记录：{msgId,zoneId,type,desc,time,sendAt,status,ackSource}
   });
+  if (!st.cmdLog) st.cmdLog = [];
   ZONE_IDS.forEach(function (z) {
     if (st.zoneState[z] === undefined) st.zoneState[z] = null;
     if (!st.d5State[z]) st.d5State[z] = { pm25Hist: [], co2Hist: [], rule: '—', ml: '—', mismatch: false };
@@ -174,6 +181,31 @@ function create(app) {
     }
   }
 
+  // 回执报文（airguard/E3/ack，Web / 3D 自动发布）：按 msgId 匹配本地指令记录，
+  // received → 已接收；executed → 已执行。只升级不降级。
+  function handleAck(payload) {
+    let ack;
+    try { ack = JSON.parse(payload); } catch (e) {
+      console.error('[AirGuard][E3] 回执解析失败:', e.message);
+      return;
+    }
+    if (!ack.msgId || (ack.ackType !== 'received' && ack.ackType !== 'executed')) return;
+    const entry = st.cmdLog.filter(function (c) { return c.msgId === ack.msgId; })[0];
+    if (!entry) {
+      console.warn('[AirGuard][E3] 回执无匹配指令，已忽略 msgId=' + ack.msgId);
+      return;
+    }
+    if (ack.ackType === 'executed') {
+      entry.status = 'executed';
+      entry.ackSource = ack.source || entry.ackSource;
+    } else if (entry.status === 'sent') {
+      entry.status = 'received';
+      entry.ackSource = ack.source || entry.ackSource;
+    }
+    console.log('[AirGuard][E3] 收到回执:', ack.ackType, ack.msgId, 'source=' + ack.source);
+    emit();
+  }
+
   // 统一入口：app.js 全局注册，页面开不开都持续处理
   function handleMsg(topic, payload) {
     // 前置判断：空报文直接跳过，避免 JSON.parse 抛 Unexpected end of JSON input
@@ -183,9 +215,67 @@ function create(app) {
     }
     st.msgCount += 1;
     st.lastTopic = topic;
+    if (topic.indexOf(ACK_TOPIC) === 0) { handleAck(payload); return; }
     if (topic.indexOf('airguard/e3/') === 0) { handleE3(topic, payload); return; }
     if (topic.indexOf('/action') > -1) { handleAction(topic, payload); return; }
     handleEnv(topic, payload);
+  }
+
+  // ---------- 指令确认回执（页面按钮调用；msgId 由这里生成并追加到指令 JSON） ----------
+
+  // 记录一条待确认指令，返回唯一 msgId（发布时一并写入指令 JSON）
+  function sendCmd(zoneId, type, desc) {
+    const msgId = 'mp-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+    st.cmdLog.push({
+      msgId: msgId, zoneId: zoneId, type: type, desc: desc,
+      time: nowStr(), sendAt: Date.now(), status: 'sent', ackSource: '',
+    });
+    if (st.cmdLog.length > CMD_LOG_MAX) st.cmdLog.splice(0, st.cmdLog.length - CMD_LOG_MAX);
+    emit();
+    return msgId;
+  }
+
+  // 发布失败（MQTT 未连接）：标记未发送
+  function markFailed(msgId) {
+    const entry = st.cmdLog.filter(function (c) { return c.msgId === msgId; })[0];
+    if (entry && entry.status === 'sent') {
+      entry.status = 'failed';
+      emit();
+    }
+  }
+
+  // 超时巡检：60 秒仍未收到 executed 回执 → 超时（由定时器周期调用）
+  function checkTimeouts() {
+    let changed = false;
+    const now = Date.now();
+    st.cmdLog.forEach(function (c) {
+      if ((c.status === 'sent' || c.status === 'received') && now - c.sendAt > ACK_TIMEOUT_MS) {
+        c.status = 'timeout';
+        changed = true;
+      }
+    });
+    if (changed) emit();
+  }
+
+  // 回执超时定时器：app 级单例，页面开不开都检查
+  setInterval(checkTimeouts, 5000);
+
+  // 清空全部业务状态（页面「清空」按钮调用，等效小程序重启）：
+  // MQTT 连接保持不动，新报文到达后自动重新填充
+  function reset() {
+    ZONE_IDS.forEach(function (z) {
+      st.zoneState[z] = null;
+      st.d5State[z] = { pm25Hist: [], co2Hist: [], rule: '—', ml: '—', mismatch: false };
+      st.d3Events[z] = null;
+      st.lastSeen[z] = null;
+    });
+    st.d3History = [];
+    st.cmdLog = [];
+    st.userPicked = false;
+    st.selected = 'zone-w';
+    st.msgCount = 0;
+    st.lastTopic = '—';
+    emit();
   }
 
   // ---------- 页面操作（由 e3 页按钮调用；发布由页面执行） ----------
@@ -232,6 +322,11 @@ function create(app) {
     clearFocus: clearFocus,
     markHandling: markHandling,
     markRecovered: markRecovered,
+    sendCmd: sendCmd,
+    markFailed: markFailed,
+    checkTimeouts: checkTimeouts,
+    reset: reset,
+    ACK_TOPIC: ACK_TOPIC,
     onChange: function (fn) { listeners.push(fn); },
     offChange: function (fn) {
       for (let i = listeners.length - 1; i >= 0; i--) {

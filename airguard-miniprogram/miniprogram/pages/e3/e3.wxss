@@ -235,6 +235,35 @@
   color: #9ca3af;
 }
 
+/* ===== 指令确认状态（三级回执） ===== */
+.ack-card {
+  padding: 8rpx 24rpx;
+}
+.ack-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12rpx;
+  padding: 12rpx 0;
+  border-bottom: 2rpx dashed #e5e7eb;
+}
+.ack-item:last-child { border-bottom: none; }
+.ack-desc {
+  flex: 1;
+  font-size: 22rpx;
+  color: #6b7280;
+  line-height: 1.4;
+}
+.ack-status {
+  flex-shrink: 0;
+  font-size: 22rpx;
+  font-weight: 600;
+}
+.ack-status.wait { color: #2563eb; }
+.ack-status.recv { color: #0891b2; }
+.ack-status.ok { color: #16a34a; }
+.ack-status.err { color: #dc2626; }
+
 /* 无数据提示（选中区域尚未收到 MQTT 环境报文） */
 .no-data-hint {
   margin-top: 12rpx;
@@ -291,6 +320,31 @@
   font-size: 22rpx;
   color: #b0b8c4;
   padding-top: 8rpx;
+}
+
+/* ===== 刷新 / 清空操作行 ===== */
+.util-row {
+  display: flex;
+  gap: 16rpx;
+  margin-top: 24rpx;
+}
+.util-btn {
+  flex: 1;
+  text-align: center;
+  font-size: 26rpx;
+  font-weight: 600;
+  border-radius: 999rpx;
+  padding: 14rpx 0;
+}
+.util-btn.refresh {
+  color: #2563eb;
+  background: #eff6ff;
+  border: 2rpx solid #bfdbfe;
+}
+.util-btn.clear {
+  color: #dc2626;
+  background: #fef2f2;
+  border: 2rpx solid #fecaca;
 }
 
 /* ===== 自诊断行 ===== */

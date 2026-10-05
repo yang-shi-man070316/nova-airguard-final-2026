@@ -1797,8 +1797,11 @@
             throw new Error('payload 不是对象');
           }
           // 按主题分流：/action 干预指令；其余按环境报文处理
-          if (topic.indexOf('/action') > -1) onActionMessage(topic, payload);
-          else onEnvMessage(topic, payload);
+          if (topic.indexOf('/action') > -1) {
+            e3Ack(client, payload, 'received');  // 回执①：已接收（小程序指令带 msgId 时）
+            onActionMessage(topic, payload);
+            e3Ack(client, payload, 'executed');  // 回执②：业务执行完成
+          } else onEnvMessage(topic, payload);
         } catch (e) {
           // 错误 JSON 不崩溃页面，仅控制台输出
           console.error('[AirGuard] 报文格式错误（JSON 解析失败）:', e);
@@ -1855,6 +1858,30 @@
         return __e3BuildReason(winner);
       };
 
+      // ---------- 消息确认回执（任务书三级反馈；新增，不影响原有逻辑） ----------
+      // 收到小程序指令（带 msgId）→ 立即回执 received；业务执行完成后回执 executed
+      function e3NowStr() {
+        const d = new Date();
+        const p = function (n) { return (n < 10 ? '0' : '') + n; };
+        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+          p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+      }
+      function e3Ack(pubClient, p, ackType) {
+        if (!p || !p.msgId) return; // 无 msgId（如 MQTTX 手发旧格式指令）不发回执，兼容原有流程
+        try {
+          pubClient.publish('airguard/E3/ack', JSON.stringify({
+            msgId: p.msgId,
+            zoneId: p.zoneId || '',
+            ackType: ackType,
+            source: 'three3d',
+            time: e3NowStr(),
+          }));
+        } catch (e) {
+          console.error('[AirGuard][E3] 回执发布失败:', e);
+        }
+        console.log('[AirGuard][E3] 回执:', ackType, p.msgId);
+      }
+
       const e3Client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000 });
       e3Client.on('connect', function () {
         e3Client.subscribe('airguard/e3/focus');
@@ -1871,14 +1898,17 @@
           const p = JSON.parse(text);
           if (!p || typeof p !== 'object' || Array.isArray(p)) return;
           if (topic.indexOf('airguard/e3/focus') === 0) {
+            e3Ack(e3Client, p, 'received'); // 回执①：已接收
             const z = p.zoneId;
             e3FocusZone = Object.prototype.hasOwnProperty.call(ZONES, z) ? z : null;
             updateD2Markers(); // 3D 发光高亮随重点区域切换
             renderD2Panel();
             console.log('[AirGuard][E3] 重点区域指令:', z || '（恢复规则判定）');
+            e3Ack(e3Client, p, 'executed'); // 回执②：业务执行完成
           } else if (topic.indexOf('airguard/e3/event') === 0) {
+            e3Ack(e3Client, p, 'received'); // 回执①：已接收
             const z = p.zoneId;
-            if (!Object.prototype.hasOwnProperty.call(ZONES, z)) return;
+            if (!Object.prototype.hasOwnProperty.call(ZONES, z)) { e3Ack(e3Client, p, 'executed'); return; }
             if (p.op === 'recovered') {
               const ev = d3Events[z];
               if (ev) {
@@ -1894,11 +1924,13 @@
               renderD3Panel();
               renderD2Panel();
               console.log('[AirGuard][E3] 事件已恢复指令:', z);
+              e3Ack(e3Client, p, 'executed'); // 回执②：业务执行完成
             } else if (p.op === 'handling') {
               d3ApplyAction(z, p.note || '小程序标记处理中');
               renderD3Panel();
               renderD2Panel();
               console.log('[AirGuard][E3] 事件处理中指令:', z);
+              e3Ack(e3Client, p, 'executed'); // 回执②：业务执行完成
             }
           }
         } catch (e) {

@@ -15,6 +15,15 @@ const ACCENT_COLORS = {
   gray: '#9ca3af',
 };
 
+// 初始区域列表（页面初始与「清空」按钮共用，每次调用返回全新数组）
+function initialZoneList() {
+  return [
+    { zoneid: 'zone-n', zoneName: '宿舍区', pm25: '--', co2: '--', crowdLevel: null, crowdText: '--', time: '--', statusText: '等待数据', accentColor: ACCENT_COLORS.gray },
+    { zoneid: 'zone-s', zoneName: '教学区', pm25: '--', co2: '--', crowdLevel: null, crowdText: '--', time: '--', statusText: '等待数据', accentColor: ACCENT_COLORS.gray },
+    { zoneid: 'zone-w', zoneName: '食堂区', pm25: '--', co2: '--', crowdLevel: null, crowdText: '--', time: '--', statusText: '等待数据', accentColor: ACCENT_COLORS.gray },
+  ];
+}
+
 Page({
   data: {
     connText: '未连接',
@@ -24,11 +33,7 @@ Page({
     conclusionText: '等待采集数据，暂无现场感知结论',
     conclusionClass: 'wait',
     conclusionIcon: '⏳',
-    zoneList: [
-      { zoneid: 'zone-n', zoneName: '宿舍区', pm25: '--', co2: '--', crowdLevel: null, crowdText: '--', time: '--', statusText: '等待数据', accentColor: ACCENT_COLORS.gray },
-      { zoneid: 'zone-s', zoneName: '教学区', pm25: '--', co2: '--', crowdLevel: null, crowdText: '--', time: '--', statusText: '等待数据', accentColor: ACCENT_COLORS.gray },
-      { zoneid: 'zone-w', zoneName: '食堂区', pm25: '--', co2: '--', crowdLevel: null, crowdText: '--', time: '--', statusText: '等待数据', accentColor: ACCENT_COLORS.gray },
-    ],
+    zoneList: initialZoneList(),
   },
 
   onLoad: function () {
@@ -68,6 +73,47 @@ Page({
   // E3 巡检协同页入口
   goE3: function () {
     wx.navigateTo({ url: '/pages/e3/e3' });
+  },
+
+  // 刷新：同步连接状态 + 全量重渲染；MQTT 断开时手动强制重连
+  onRefresh: function () {
+    const app = getApp();
+    const st = app.globalData.connState;
+    this.setData({
+      connText: app.globalData.connText,
+      connClass: st === 'on' ? 'ok' : (st === 'off' ? 'err' : ''),
+    });
+    this.updateStats();
+    const mqtt = app.globalData.mqtt;
+    if (mqtt && !mqtt.connected) {
+      mqtt.forceReconnect();
+      wx.showToast({ title: '已刷新，正在重连…', icon: 'none' });
+    } else {
+      wx.showToast({ title: '已刷新', icon: 'none' });
+    }
+  },
+
+  // 清空：页面数据恢复初始（新报文到达会自动重新填充）
+  onClear: function () {
+    const self = this;
+    wx.showModal({
+      title: '清空页面',
+      content: '确认清空当前页面数据？新报文到达会自动重新填充。',
+      confirmText: '清空',
+      confirmColor: '#dc2626',
+      success: function (res) {
+        if (!res.confirm) return;
+        self.setData({
+          zoneList: initialZoneList(),
+          onlineText: '在线区域 0/3',
+          conclusionText: '等待采集数据，暂无现场感知结论',
+          conclusionClass: 'wait',
+          conclusionIcon: '⏳',
+        });
+        self.lastAlert = {};
+        wx.showToast({ title: '已清空', icon: 'none' });
+      },
+    });
   },
 
   // 处理单条环境报文：{"zoneId":"zone-n","pm25":160,"co2":920,"crowdLevel":3,"time":"..."}

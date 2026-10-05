@@ -20,6 +20,16 @@ function fmtClock(d) {
   return p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds());
 }
 
+// 指令确认三级状态展示（任务书消息确认回执）
+const ACK_TEXT = {
+  sent: '✅已发送',
+  received: '📩已接收',
+  executed: '🟢已执行',
+  timeout: '⚠等待确认超时，请检查连接',
+  failed: '❌未发送（MQTT 未连接）',
+};
+const ACK_CLS = { sent: 'wait', received: 'recv', executed: 'ok', timeout: 'err', failed: 'err' };
+
 Page({
   data: {
     connText: '未连接',
@@ -39,6 +49,7 @@ Page({
     onlineText: '在线 0/3',
     msgCount: 0,      // 自诊断：状态机累计收到的消息数（页面未打开时也计数）
     lastTopic: '—',   // 自诊断：最近收到的主题
+    ackList: [],      // 指令确认状态（已发送 / 已接收 / 已执行 / 超时），多条独立展示
   },
 
   onLoad: function () {
@@ -51,6 +62,7 @@ Page({
       return;
     }
     this.st = this.store.state;
+    this._seenTimeouts = {}; // 已弹过超时提示的 msgId（每条指令只提示一次）
 
     // 恢复上次选中区域（不清零）
     if (ZONE_IDS.indexOf(this.st.selected) > -1 && this.st.selected !== this.data.selected) {
@@ -91,7 +103,10 @@ Page({
     const z = e.currentTarget.dataset.zone;
     console.log('[AirGuard][E3] 点击区域标签:', z); // 诊断：确认 tap 事件触发
     if (!this.store.selectZone(z)) return;
-    const ok = this.publish('airguard/e3/focus', JSON.stringify({ zoneId: z, time: this.store.nowStr() }));
+    // 生成唯一 msgId 追加到指令：三级回执（已发送 / 已接收 / 已执行）
+    const msgId = this.store.sendCmd(z, 'focus', '切换重点区域·' + ZONES[z]);
+    const ok = this.publish('airguard/e3/focus', JSON.stringify({ zoneId: z, msgId: msgId, time: this.store.nowStr() }));
+    if (!ok) this.store.markFailed(msgId);
     wx.showToast({ title: ok ? '已切换：' + ZONES[z] : '已切换：' + ZONES[z] + '（未同步）', icon: 'none' });
   },
 
@@ -99,7 +114,9 @@ Page({
   onClearFocus: function () {
     console.log('[AirGuard][E3] 点击恢复规则判定');
     this.store.clearFocus();
-    const ok = this.publish('airguard/e3/focus', JSON.stringify({ zoneId: '', time: this.store.nowStr() }));
+    const msgId = this.store.sendCmd('', 'focus', '恢复规则判定');
+    const ok = this.publish('airguard/e3/focus', JSON.stringify({ zoneId: '', msgId: msgId, time: this.store.nowStr() }));
+    if (!ok) this.store.markFailed(msgId);
     wx.showToast({ title: ok ? '已恢复规则判定' : 'MQTT 未连接', icon: 'none' });
   },
 
@@ -111,9 +128,11 @@ Page({
       wx.showToast({ title: '当前无 OPEN 待处理事件', icon: 'none' });
       return;
     }
-    this.publish('airguard/' + z + '/action', JSON.stringify({
-      zoneId: z, action: '小程序巡检标记处理中', time: this.store.nowStr(),
+    const msgId = this.store.sendCmd(z, 'action', '标记处理中·' + ZONES[z]);
+    const ok = this.publish('airguard/' + z + '/action', JSON.stringify({
+      zoneId: z, action: '小程序巡检标记处理中', msgId: msgId, time: this.store.nowStr(),
     }));
+    if (!ok) this.store.markFailed(msgId);
     wx.showToast({ title: '已标记处理中', icon: 'none' });
   },
 
@@ -125,9 +144,11 @@ Page({
       wx.showToast({ title: '当前无处理中事件', icon: 'none' });
       return;
     }
-    this.publish('airguard/e3/event', JSON.stringify({
-      zoneId: z, op: 'recovered', note: '小程序巡检确认', time: this.store.nowStr(),
+    const msgId = this.store.sendCmd(z, 'event', '标记已恢复·' + ZONES[z]);
+    const ok = this.publish('airguard/e3/event', JSON.stringify({
+      zoneId: z, op: 'recovered', note: '小程序巡检确认', msgId: msgId, time: this.store.nowStr(),
     }));
+    if (!ok) this.store.markFailed(msgId);
     wx.showToast({ title: '已标记恢复', icon: 'none' });
   },
 
@@ -138,6 +159,38 @@ Page({
     }
     this.client.publish(topic, payload);
     return true;
+  },
+
+  // 刷新：同步连接状态 + 从共享状态机全量重渲染；MQTT 断开时手动强制重连
+  onRefresh: function () {
+    const app = getApp();
+    this.renderAll();
+    this._onConn();
+    const mqtt = app.globalData.mqtt;
+    if (mqtt && !mqtt.connected) {
+      mqtt.forceReconnect();
+      wx.showToast({ title: '已刷新，正在重连…', icon: 'none' });
+    } else {
+      wx.showToast({ title: '已刷新', icon: 'none' });
+    }
+  },
+
+  // 清空：共享状态机恢复初始（等效小程序重启；新报文到达会自动重新填充）
+  onClear: function () {
+    const self = this;
+    wx.showModal({
+      title: '清空页面',
+      content: '确认清空巡检协同页面数据？新报文到达会自动重新填充。',
+      confirmText: '清空',
+      confirmColor: '#dc2626',
+      success: function (res) {
+        if (!res.confirm) return;
+        self.store.reset();
+        self._seenTimeouts = {};
+        self.renderAll();
+        wx.showToast({ title: '已清空', icon: 'none' });
+      },
+    });
   },
 
   // ---------- 渲染（只读共享状态机，全部状态在 st 上） ----------
@@ -212,6 +265,26 @@ Page({
       return st.lastSeen[id] && (Date.now() - st.lastSeen[id].getTime()) <= OFFLINE_MS;
     }).length;
 
+    // 指令确认状态：最近 5 条，各条独立展示三级回执状态
+    const ackList = st.cmdLog.slice(-5).reverse().map(function (c) {
+      return {
+        msgId: c.msgId,
+        desc: c.time + ' · ' + c.desc,
+        statusText: ACK_TEXT[c.status] || c.status,
+        cls: ACK_CLS[c.status] || 'wait',
+      };
+    });
+
+    // 新出现的超时指令弹一次提示
+    const self = this;
+    const newTimeouts = st.cmdLog.filter(function (c) {
+      return c.status === 'timeout' && !self._seenTimeouts[c.msgId];
+    });
+    if (newTimeouts.length > 0) {
+      newTimeouts.forEach(function (c) { self._seenTimeouts[c.msgId] = true; });
+      wx.showToast({ title: '⚠ 指令等待确认超时，请检查连接', icon: 'none' });
+    }
+
     this.setData({
       selected: z,
       focus: focus,
@@ -220,6 +293,7 @@ Page({
       onlineText: '在线 ' + onlineCount + '/3',
       msgCount: st.msgCount,
       lastTopic: st.lastTopic,
+      ackList: ackList,
     });
   },
 });
