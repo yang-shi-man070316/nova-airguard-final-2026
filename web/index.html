@@ -500,7 +500,34 @@
     #panel-e2 { grid-column: auto; }
     .e2-grid { grid-template-columns: 1fr; }
     .e2-bottom { grid-template-columns: 1fr; }
+    #panel-history { grid-column: auto; }
   }
+  /* ===== 历史与审计面板（SQLite 持久化扩展，追加功能） ===== */
+  #panel-history { grid-column: 1 / -1; }
+  .hist-tabs { display: flex; gap: 8px; }
+  .hist-tab {
+    font-size: 12px; padding: 6px 16px; border: 1px solid #cbd5e1; background: #fff;
+    color: #475569; border-radius: 6px; cursor: pointer;
+  }
+  .hist-tab.active { background: #2563eb; border-color: #2563eb; color: #fff; font-weight: 600; }
+  .hist-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  .hist-toolbar select, .hist-toolbar button {
+    font-size: 12px; padding: 5px 12px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff;
+  }
+  .hist-toolbar button { cursor: pointer; color: #2563eb; border-color: #2563eb; }
+  #hist-chart { width: 100%; height: 180px; display: block; }
+  .hist-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+  .hist-table th, .hist-table td { border: 1px solid var(--border); padding: 4px 8px; text-align: center; }
+  .hist-table th { background: #f8fafc; color: var(--muted); }
+  #hist-audit-list { list-style: none; font-size: 12.5px; max-height: 340px; overflow-y: auto; }
+  #hist-audit-list li { display: flex; align-items: baseline; gap: 8px; padding: 6px 8px; border-bottom: 1px dashed var(--border); flex-wrap: wrap; }
+  .hist-badge { flex-shrink: 0; font-size: 11px; padding: 1px 8px; border-radius: 999px; color: #fff; white-space: nowrap; }
+  .hist-badge.sensor { background: #94a3b8; }
+  .hist-badge.manual { background: #f59e0b; }
+  .hist-src { flex-shrink: 0; font-size: 11px; color: #2563eb; white-space: nowrap; }
+  .hist-time { flex-shrink: 0; font-size: 11px; color: #9ca3af; font-family: Consolas, monospace; }
+  .hist-content { flex: 1; min-width: 160px; }
+  .hist-empty { color: #9ca3af; font-size: 12px; padding: 12px; text-align: center; }
   </style>
 </head>
 <body>
@@ -679,6 +706,37 @@
           <div class="e2-card-title">📋 事件与抓拍日志<span class="e2-card-sub">与 D3 事件记录合并</span></div>
           <ul id="e2-log"></ul>
         </div>
+      </div>
+    </section>
+
+    <!-- ===== 历史与审计面板（SQLite 持久化扩展，追加功能，不改动原有代码） ===== -->
+    <section class="panel" id="panel-history">
+      <div class="panel-head">
+        <h2>历史与审计<span class="tag">SQLite</span></h2>
+        <div class="hist-tabs">
+          <button id="hist-tab-zone" class="hist-tab active" type="button">区域历史数据</button>
+          <button id="hist-tab-audit" class="hist-tab" type="button">统一操作审计</button>
+        </div>
+      </div>
+      <div id="hist-zone-view">
+        <div class="hist-toolbar">
+          <label>区域</label>
+          <select id="hist-zone-select">
+            <option value="zone-n">宿舍区（zone-n）</option>
+            <option value="zone-s">教学区（zone-s）</option>
+            <option value="zone-w">食堂区（zone-w）</option>
+          </select>
+          <button id="hist-zone-load" type="button">加载历史</button>
+          <span id="hist-zone-info"></span>
+        </div>
+        <canvas id="hist-chart" height="180"></canvas>
+        <table class="hist-table" id="hist-table">
+          <thead><tr><th>#</th><th>接收时间</th><th>PM2.5</th><th>CO₂</th><th>人流等级</th><th>状态</th></tr></thead>
+          <tbody id="hist-table-body"></tbody>
+        </table>
+      </div>
+      <div id="hist-audit-view" style="display:none">
+        <ul id="hist-audit-list"></ul>
       </div>
     </section>
   </main>
@@ -2162,6 +2220,153 @@
       e3RenderBadge();
 
       renderAll(); // 初始渲染：所有模块显示等待状态
+
+      // ============ 历史与审计面板（SQLite 持久化扩展，仅追加，不改动原有代码） ============
+      // 数据由 db_recorder.py 订阅 MQTT 落库并提供 HTTP 只读查询；
+      // 脚本未启动时面板显示提示，三端监测与 E3 回执照常运行，不受影响。
+      const DB_API = 'http://127.0.0.1:8090';
+      const $histTabZone = document.getElementById('hist-tab-zone');
+      const $histTabAudit = document.getElementById('hist-tab-audit');
+      const $histZoneView = document.getElementById('hist-zone-view');
+      const $histAuditView = document.getElementById('hist-audit-view');
+      const $histZoneSelect = document.getElementById('hist-zone-select');
+      const $histZoneInfo = document.getElementById('hist-zone-info');
+      const $histTableBody = document.getElementById('hist-table-body');
+      const $histAuditList = document.getElementById('hist-audit-list');
+      const $histChart = document.getElementById('hist-chart');
+
+      const HIST_STATUS_BG = { '正常': '#e8f5e9', '轻度污染': '#fff8e1', '重度污染': '#ffebee', '通风不足风险': '#f3e5f5' };
+      const HIST_STATUS_FG = { '正常': '#2e7d32', '轻度污染': '#f57f17', '重度污染': '#c62828', '通风不足风险': '#7b1fa2' };
+
+      function histDbFetch(url) {
+        return fetch(url).then(function (r) { return r.json(); });
+      }
+
+      function histShowOffline(msg) {
+        $histZoneInfo.textContent = msg;
+        $histTableBody.innerHTML = '';
+        drawHistChart([]);
+        if ($histAuditView.style.display !== 'none') {
+          $histAuditList.innerHTML = '<li class="hist-empty">' + msg + '</li>';
+        }
+      }
+
+      function switchHistTab(zone) {
+        $histTabZone.className = 'hist-tab' + (zone ? ' active' : '');
+        $histTabAudit.className = 'hist-tab' + (zone ? '' : ' active');
+        $histZoneView.style.display = zone ? '' : 'none';
+        $histAuditView.style.display = zone ? 'none' : '';
+      }
+      $histTabZone.addEventListener('click', function () { switchHistTab(true); });
+      $histTabAudit.addEventListener('click', function () { switchHistTab(false); });
+
+      // 简易折线图（原生 canvas，无第三方依赖）：PM2.5 红 / CO₂ 蓝 双序列
+      function drawHistChart(rows) {
+        const canvas = $histChart;
+        const ctx = canvas.getContext('2d');
+        const W = canvas.width = canvas.clientWidth || 900;
+        const H = canvas.height = 180;
+        ctx.clearRect(0, 0, W, H);
+        if (!rows || rows.length === 0) {
+          ctx.fillStyle = '#9ca3af';
+          ctx.fillText('暂无历史数据', W / 2 - 40, H / 2);
+          return;
+        }
+        const pad = { l: 44, r: 12, t: 12, b: 24 };
+        const xs = function (i) {
+          return pad.l + (W - pad.l - pad.r) * (rows.length === 1 ? 0.5 : i / (rows.length - 1));
+        };
+        const pmax = Math.max.apply(null, rows.map(function (r) { return Math.max(r.pm25, r.co2); })) || 1;
+        const ys = function (v) { return pad.t + (H - pad.t - pad.b) * (1 - v / pmax); };
+        // 网格与 Y 轴刻度
+        ctx.strokeStyle = '#e5e7eb';
+        ctx.fillStyle = '#9ca3af';
+        ctx.font = '10px sans-serif';
+        ctx.lineWidth = 1;
+        for (let g = 0; g <= 2; g++) {
+          const gy = pad.t + (H - pad.t - pad.b) * g / 2;
+          ctx.beginPath(); ctx.moveTo(pad.l, gy); ctx.lineTo(W - pad.r, gy); ctx.stroke();
+          ctx.fillText(String(Math.round(pmax * (1 - g / 2))), 2, gy + 3);
+        }
+        // 两条折线 + 数据点
+        [['#ef4444', 'pm25'], ['#3b82f6', 'co2']].forEach(function (ser) {
+          ctx.strokeStyle = ser[0];
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          rows.forEach(function (r, i) {
+            if (i === 0) ctx.moveTo(xs(i), ys(r[ser[1]]));
+            else ctx.lineTo(xs(i), ys(r[ser[1]]));
+          });
+          ctx.stroke();
+          rows.forEach(function (r, i) {
+            ctx.fillStyle = ser[0];
+            ctx.beginPath(); ctx.arc(xs(i), ys(r[ser[1]]), 2, 0, Math.PI * 2); ctx.fill();
+          });
+        });
+        // 图例 + 首末时间
+        ctx.fillStyle = '#ef4444'; ctx.fillText('PM2.5', pad.l, H - 8);
+        ctx.fillStyle = '#3b82f6'; ctx.fillText('CO₂', pad.l + 48, H - 8);
+        ctx.fillStyle = '#9ca3af';
+        ctx.fillText(rows[0].receive_time + ' ~ ' + rows[rows.length - 1].receive_time, pad.l + 100, H - 8);
+      }
+
+      function loadZoneHistory() {
+        const zone = $histZoneSelect.value;
+        $histZoneInfo.textContent = '加载中…';
+        histDbFetch(DB_API + '/api/sensorHistory?zoneId=' + encodeURIComponent(zone) + '&limit=100')
+          .then(function (res) {
+            if (!res || !res.ok) throw new Error((res && res.error) || 'bad response');
+            const rows = res.data || [];
+            $histZoneInfo.textContent = '共 ' + rows.length + ' 条（最近 100 条）';
+            $histTableBody.innerHTML = rows.map(function (r, i) {
+              const bg = HIST_STATUS_BG[r.status] || '#ffffff';
+              const fg = HIST_STATUS_FG[r.status] || '#475569';
+              return '<tr><td>' + (i + 1) + '</td><td>' + (r.receive_time || '—') + '</td><td>' +
+                r.pm25 + '</td><td>' + r.co2 + '</td><td>' +
+                (r.crowdLevel === null || r.crowdLevel === undefined ? '—' : 'L' + r.crowdLevel) + '</td>' +
+                '<td style="background:' + bg + ';color:' + fg + ';font-weight:600">' + (r.status || '—') + '</td></tr>';
+            }).join('');
+            drawHistChart(rows);
+          })
+          .catch(function (e) {
+            histShowOffline('历史数据加载失败：请先启动 db_recorder.py（python db_recorder.py）。三端监测不受影响。');
+            console.warn('[AirGuard][Hist] 历史数据加载失败:', e);
+          });
+      }
+
+      const HIST_TYPE_TEXT = { sensor_data: '传感器', zone_focus_switch: '重点区域', event_handling: '处理中', event_recovered: '已恢复' };
+      const HIST_SRC_TEXT = { sensor_sim: '传感器', miniprogram: '小程序', web: 'Web' };
+
+      function loadAudit() {
+        histDbFetch(DB_API + '/api/eventAudit?limit=20')
+          .then(function (res) {
+            if (!res || !res.ok) throw new Error((res && res.error) || 'bad response');
+            const rows = res.data || [];
+            if (rows.length === 0) {
+              $histAuditList.innerHTML = '<li class="hist-empty">暂无审计记录</li>';
+              return;
+            }
+            $histAuditList.innerHTML = rows.map(function (r) {
+              const manual = r.event_type !== 'sensor_data';
+              return '<li>' +
+                '<span class="hist-badge ' + (manual ? 'manual' : 'sensor') + '">' + (HIST_TYPE_TEXT[r.event_type] || r.event_type) + '</span>' +
+                '<span class="hist-src">' + (HIST_SRC_TEXT[r.source] || r.source) + '</span>' +
+                '<span class="hist-time">' + (r.op_time || '—') + '</span>' +
+                (r.zoneId ? '<span class="zone-id" style="font-size:10px">' + r.zoneId + '</span>' : '') +
+                '<span class="hist-content">' + (r.content || '') + '</span></li>';
+            }).join('');
+          })
+          .catch(function (e) {
+            histShowOffline('审计记录加载失败：请先启动 db_recorder.py（python db_recorder.py）。三端监测不受影响。');
+            console.warn('[AirGuard][Hist] 审计加载失败:', e);
+          });
+      }
+
+      $histZoneSelect.addEventListener('change', loadZoneHistory);
+      document.getElementById('hist-zone-load').addEventListener('click', loadZoneHistory);
+      // 页面加载时拉取一次：数据库服务未启动时仅面板内提示，不影响监测主链路
+      loadZoneHistory();
+      loadAudit();
     })();
   </script>
 </body>

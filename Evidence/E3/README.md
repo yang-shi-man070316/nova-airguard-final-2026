@@ -16,6 +16,15 @@
               three-min 3D 孪生（发光高亮/状态壳）
 ```
 
+SQLite 持久化扩展（黄色扩展项，附加链路，不影响上面主链路）：
+
+```
+   db_recorder.py ──订阅(只订阅不发布)──► mosquitto ──► 落库 airguard.db
+   （MQTT订阅 + SQLite + 简易HTTP只读查询）              ├─ sensor_history 区域感知历史
+                                                         └─ event_audit 统一事件审计
+   web/index.html「历史与审计面板」──HTTP GET──► db_recorder.py（只读查询，前端不直接操作SQLite）
+```
+
 - **Web 监测台**：中控总览、多区域表格、完整事件日志、热力图，适合电脑值守
 - **小程序**：精简巡检视图，只展示当前重点区域、实时感知结论、关键操作按钮（切换重点区域、标记事件处理状态），面向现场巡检人员
 - **终端分工**：小程序 ≠ 复刻监测台全部功能
@@ -30,6 +39,7 @@
 | 数据源 | sensor_sim.py（任意模式）或 MQTTX |
 | 小程序 | 微信开发者工具打开 `airguard-miniprogram` 工程；**详情 → 本地设置 → 勾选「不校验合法域名、web-view（业务域名）、TLS 版本以及 HTTPS 证书」**；修改代码后点「编译」；真机调试需手机与电脑同一局域网（app.js 已配电脑局域网 IP） |
 | Web / 3D | 浏览器直接打开 web/index.html 与 three3d/three-min.html（可同时开三个窗口对照观察） |
+| SQLite 记录（可选） | `pip install paho-mqtt` 后 `python db_recorder.py`：历史/审计落库 + HTTP 只读查询；不启动不影响三端演示 |
 
 ## 三、MQTT 协议总表（三端共用）
 
@@ -102,8 +112,8 @@
 
 | 按钮 | 行为 |
 |---|---|
-| 🔄 刷新 | 同步 MQTT 连接状态 + 全量重渲染；若 MQTT 已断开则强制重连（干净关闭旧连接后重建，CONNACK 后按清单自动重订阅），toast 提示「已刷新，正在重连…」 |
-| 🗑 清空 | 弹确认框 → 页面数据恢复初始状态（E3 页清空共享状态机，等效小程序重启；首页清空三区卡片与感知结论）。MQTT 连接保持不断，新报文到达后自动重新填充 |
+| 刷新 | 同步 MQTT 连接状态 + 全量重渲染；若 MQTT 已断开则强制重连（干净关闭旧连接后重建，CONNACK 后按清单自动重订阅），toast 提示「已刷新，正在重连…」 |
+| 清空 | 弹确认框 → 页面数据恢复初始状态（E3 页清空共享状态机，等效小程序重启；首页清空三区卡片与感知结论）。MQTT 连接保持不断，新报文到达后自动重新填充 |
 
 ### 页面状态保持
 
@@ -161,7 +171,73 @@ E3 业务状态由**共享状态机** `utils/e3store.js` 维护：app.js 在全�
 4. 关闭所有 Web 页面（index.html、dashboard.html、three-min.html 三个窗口全关，无接收端）→ 小程序再点「标记处理中」→ 显示 **✅已发送**，60 秒后自动变 **⚠等待确认超时，请检查连接** 并弹出一次提示
 5. 环境报文回归：MQTTX 发 `airguard/+/env` 报文 → 三端数据照常刷新，不出现任何回执交互
 
-## 六、常见问题
+## 六、SQLite 持久化与统一审计（黄色扩展项）
+
+### 1. 简介
+
+`db_recorder.py`（Python 内置 sqlite3，单文件库，**不使用 MySQL**，减少部署依赖）订阅全部 MQTT 主题，把区域感知历史与所有跨端操作/事件生命周期写入 `airguard.db`（脚本启动时自动建库建表，无需手动执行 SQL）。Web 前端只通过 HTTP GET 查询展示，不直接操作 SQLite。
+
+- 写入只由 MQTT 订阅脚本完成（HTTP 只提供 GET 查询，无写入接口）
+- 脚本停止后整套三端监测 / E3 回执照常运行，不受影响（纯附加链路）
+- 重启整套系统后历史数据不丢失，刷新 Web 页面可重新加载历史记录
+
+### 2. 数据表结构
+
+**表1：sensor_history 区域感知历史表**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | INTEGER | 自增主键 |
+| zoneId | TEXT | 区域 ID（zone-n / zone-s / zone-w） |
+| pm25 | REAL | PM2.5 数值 |
+| co2 | REAL | CO₂ 数值 |
+| crowdLevel | INTEGER | 人流等级（0-3） |
+| status | TEXT | 状态文本（正常/轻度污染/重度污染/通风不足风险，与全端统一判级规则一致） |
+| receive_time | TEXT | 报文接收时间戳 |
+
+**表2：event_audit 统一事件 & 操作审计表（核心）**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | INTEGER | 自增主键 |
+| event_type | TEXT | sensor_data / zone_focus_switch / event_handling / event_recovered |
+| zoneId | TEXT | 对应区域 |
+| source | TEXT | 操作来源：web / miniprogram / sensor_sim |
+| content | TEXT | 描述文本（如「小程序切换重点区域到教学区（zone-s）」） |
+| extra_json | TEXT | 附加信息 JSON 字符串（msgId、旧状态、新状态等） |
+| op_time | TEXT | 操作时间戳 |
+
+### 3. 启动步骤
+
+```bash
+pip install paho-mqtt          # 首次需要（与 sensor_sim.py 相同依赖）
+python db_recorder.py          # 项目根目录；Ctrl+C 停止
+```
+
+启动输出示例：`SQLite 数据库: ...\airguard.db`、`HTTP 查询接口: http://127.0.0.1:8090/...`。之后保持运行，所有 MQTT 报文自动落库。
+
+### 4. HTTP 查询接口（只读）
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/sensorHistory?zoneId=zone-w[&limit=100]` | 获取该区域历史感知数据（按时间升序返回，limit 默认 100 最大 500） |
+| `GET /api/eventAudit?limit=20` | 获取最近 N 条事件 & 操作审计记录（按时间倒序） |
+
+接口返回 `{"ok":true,"count":N,"data":[...]}`，已带 CORS 头（`file://` 页面 fetch 可用）。Web 面板在 db_recorder.py 未启动时仅显示提示，不影响监测主链路。
+
+### 5. 验收 6：SQLite 持久化与统一审计
+
+**准备**：broker 运行 → `python db_recorder.py` → 打开 web/index.html（滚动到底部「历史与审计」面板）→ 小程序编译进入 E3 页。
+
+1. 启动 db_recorder.py → 项目根目录自动生成 `airguard.db`（含 sensor_history / event_audit 两表，无需手动建表）
+2. MQTTX 向 `airguard/zone-w/env` 发一条报文 → 「区域历史数据」标签页选食堂区点「加载历史」→ 表格出现该条记录（PM2.5/CO₂/人流/状态着色正确），下方折线图出现 PM2.5（红）、CO₂（蓝）数据点
+3. 小程序点「教学区」标签 → 「统一操作审计」标签页出现 `zone_focus_switch` 记录：橙色「重点区域」徽标 + 来源「小程序」+ 描述内容
+4. 小程序依次「标记处理中」「标记已恢复」（先造 OPEN 事件）→ 审计列表出现 `event_handling`、`event_recovered` 记录，与 `sensor_data` 灰色「传感器」记录区分展示
+5. 停掉 db_recorder.py（Ctrl+C）→ 三端监测、E3 消息回执照常工作；面板显示「请先启动 db_recorder.py」提示，不报错
+6. 重启 db_recorder.py → 刷新 Web 页面 → 历史数据与审计记录完整保留（重启不丢数据）
+7. （可选）浏览器直接访问 `http://127.0.0.1:8090/api/eventAudit?limit=5` 验证只读接口 JSON 输出
+
+## 七、常见问题
 
 | 现象 | 原因与处理 |
 |---|---|

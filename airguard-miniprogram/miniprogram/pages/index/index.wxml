@@ -59,8 +59,8 @@
 
   <!-- 刷新 / 清空：页面卡顿点刷新，清空页面点清空 -->
   <view class="util-row">
-    <view class="util-btn refresh" bindtap="onRefresh">🔄 刷新</view>
-    <view class="util-btn clear" bindtap="onClear">🗑 清空</view>
+    <view class="util-btn refresh" bindtap="onRefresh">刷新</view>
+    <view class="util-btn clear" bindtap="onClear">清空</view>
   </view>
 
   <!-- 底部数据来源提示 -->
