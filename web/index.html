@@ -753,7 +753,9 @@
       'use strict';
 
       // ============ 配置 ============
-      const MQTT_URL = 'ws://127.0.0.1:8083/mqtt';
+      // 本机 Chrome 无法建立到 127.0.0.1 回环的 WebSocket（实测 0 连接），
+      // 改用局域网 IP（192.168.100.102），Chrome 连该地址已验证正常；路由器换 IP 时同步更新
+      const MQTT_URL = 'ws://192.168.100.102:8083/mqtt';
       const TOPIC = 'airguard/+/env';
       // D3 干预指令主题：按钮点击后广播，三端（总视图 / 3D / 移动端）同步进入 HANDLING
       const ACTION_TOPIC = 'airguard/+/action';
@@ -1620,7 +1622,8 @@
       });
 
       // ============ MQTT 连接 ============
-      const client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000 });
+      // protocols: ['mqtt'] 必须显式声明：新版 mosquitto 要求 WS 握手带 mqtt 子协议，否则直接断连
+      const client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000, protocols: ['mqtt'] });
 
       client.on('connect', function () {
         setConn('on');
@@ -2062,7 +2065,7 @@
       });
 
       // E2 独立订阅：面板随最新报文刷新，不介入 D1-D5 处理链
-      const e2Client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000 });
+      const e2Client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000, protocols: ['mqtt'] });
       e2Client.on('connect', function () {
         e2Client.subscribe(TOPIC);
         e2Client.subscribe(ACTION_TOPIC);
@@ -2163,7 +2166,7 @@
       }
 
       // E3 独立订阅：与主 client 的订阅互不干扰，仅处理跨端指令
-      const e3Client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000 });
+      const e3Client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000, protocols: ['mqtt'] });
       e3Client.on('connect', function () {
         e3Client.subscribe('airguard/e3/focus');
         e3Client.subscribe('airguard/e3/event');
@@ -2245,7 +2248,7 @@
       function histShowOffline(msg) {
         $histZoneInfo.textContent = msg;
         $histTableBody.innerHTML = '';
-        drawHistChart([]);
+        drawHistChart([]); // 组件渲染空数据：图表区显示「暂无历史数据」
         if ($histAuditView.style.display !== 'none') {
           $histAuditList.innerHTML = '<li class="hist-empty">' + msg + '</li>';
         }

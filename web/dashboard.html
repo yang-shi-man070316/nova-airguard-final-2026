@@ -357,7 +357,9 @@
       'use strict';
 
       // ============ 配置 ============
-      const MQTT_URL = 'ws://127.0.0.1:8083/mqtt';
+      // 本机 Chrome 无法建立到 127.0.0.1 回环的 WebSocket（实测 0 连接），
+      // 改用局域网 IP（192.168.100.102），Chrome 连该地址已验证正常；路由器换 IP 时同步更新
+      const MQTT_URL = 'ws://192.168.100.102:8083/mqtt';
       const TOPIC = 'airguard/+/env';
 
       // 区域配置：zoneId → 中文名
@@ -842,7 +844,8 @@
       }
 
       // ============ MQTT 连接 ============
-      const client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000 });
+      // protocols: ['mqtt'] 必须显式声明：新版 mosquitto 要求 WS 握手带 mqtt 子协议，否则直接断连
+      const client = mqtt.connect(MQTT_URL, { reconnectPeriod: 5000, protocols: ['mqtt'] });
 
       client.on('connect', function () {
         setConn('on');

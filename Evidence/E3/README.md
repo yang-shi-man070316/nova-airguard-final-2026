@@ -241,6 +241,7 @@ python db_recorder.py          # 项目根目录；Ctrl+C 停止
 
 | 现象 | 原因与处理 |
 |---|---|
+| Web 页面连接断开：Console 报 `WebSocket connection ... failed: Connection closed before receiving a handshake response` | 新版 mosquitto 要求 WS 握手带 `mqtt` 子协议，mqtt.js v5 默认不发送 → 已修复：三个页面的 mqtt.connect 全部显式加 `protocols: ['mqtt']`（小程序客户端原本就带，故一直正常） |
 | `exceed max task count` / 同时最多发起 2 个 socket | 页面各自建连超限 → 已改为 app.js 全局单例（全小程序仅 1 个 WebSocket）；改代码后需点「编译」 |
 | `closeSocket:fail task not found` | 关闭无效连接任务 → 连接失败时 task 置空，不再触发 |
 | 小程序收不到数据 | 检查本地设置是否勾选「不校验合法域名」；确认 broker 8083 在监听；真机需用电脑局域网 IP（app.js 已默认 192.168.100.102，换网络后 ipconfig 查新 IP 更新） |
